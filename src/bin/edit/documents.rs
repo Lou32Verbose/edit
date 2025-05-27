@@ -194,6 +194,16 @@ impl DocumentManager {
         };
         doc.set_path(path);
 
+        if let Some(active) = self.active()
+            && active.path.is_none()
+            && active.file_id.is_none()
+            && !active.buffer.borrow().is_dirty()
+        {
+            // If the current document is a pristine Untitled document with no
+            // name and no ID, replace it with the new document.
+            self.remove_active();
+        }
+
         self.list.push_front(doc);
         Ok(self.list.front_mut().unwrap())
     }
