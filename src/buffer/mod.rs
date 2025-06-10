@@ -525,39 +525,53 @@ impl TextBuffer {
     }
 
     pub fn reflow(&mut self) {
-        // +1 onto logical_lines, because line numbers are 1-based.
-        // +1 onto log10, because we want the digit width and not the actual log10.
-        // +3 onto log10, because we append " | " to the line numbers to form the margin.
-        self.margin_width = if self.margin_enabled {
-            self.stats.logical_lines.ilog10() as CoordType + 4
-        } else {
-            0
-        };
+        self.reflow_internal(true);
+    }
 
-        let text_width = self.text_width();
-        // 2 columns are required, because otherwise wide glyphs wouldn't ever fit.
-        self.word_wrap_column =
-            if self.word_wrap_enabled && text_width >= 2 { text_width } else { 0 };
+    fn recalc_after_content_changed(&mut self) {
+        self.reflow_internal(false);
+    }
 
-        // Recalculate the cursor position.
-        self.cursor = self.cursor_move_to_logical_internal(
-            if self.word_wrap_column > 0 {
-                Default::default()
+    fn reflow_internal(&mut self, force: bool) {
+        let word_wrap_column_before = self.word_wrap_column;
+
+        {
+            // +1 onto logical_lines, because line numbers are 1-based.
+            // +1 onto log10, because we want the digit width and not the actual log10.
+            // +3 onto log10, because we append " | " to the line numbers to form the margin.
+            self.margin_width = if self.margin_enabled {
+                self.stats.logical_lines.ilog10() as CoordType + 4
             } else {
-                self.goto_line_start(self.cursor, self.cursor.logical_pos.y)
-            },
-            self.cursor.logical_pos,
-        );
+                0
+            };
 
-        // Recalculate the line statistics.
-        if self.word_wrap_column > 0 {
-            let end = self.cursor_move_to_logical_internal(self.cursor, Point::MAX);
-            self.stats.visual_lines = end.visual_pos.y + 1;
-        } else {
-            self.stats.visual_lines = self.stats.logical_lines;
+            let text_width = self.text_width();
+            // 2 columns are required, because otherwise wide glyphs wouldn't ever fit.
+            self.word_wrap_column =
+                if self.word_wrap_enabled && text_width >= 2 { text_width } else { 0 };
         }
 
         self.cursor_for_rendering = None;
+
+        if force || self.word_wrap_column != word_wrap_column_before {
+            // Recalculate the cursor position.
+            self.cursor = self.cursor_move_to_logical_internal(
+                if self.word_wrap_column > 0 {
+                    Default::default()
+                } else {
+                    self.goto_line_start(self.cursor, self.cursor.logical_pos.y)
+                },
+                self.cursor.logical_pos,
+            );
+
+            // Recalculate the line statistics.
+            if self.word_wrap_column > 0 {
+                let end = self.cursor_move_to_logical_internal(self.cursor, Point::MAX);
+                self.stats.visual_lines = end.visual_pos.y + 1;
+            } else {
+                self.stats.visual_lines = self.stats.logical_lines;
+            }
+        }
     }
 
     /// Replaces the entire buffer contents with the given `text`.
@@ -580,9 +594,7 @@ impl TextBuffer {
         self.redo_stack.clear();
         self.last_history_type = HistoryType::Other;
         self.cursor = Default::default();
-        self.cursor_for_rendering = None;
         self.set_selection(None);
-        self.search = None;
         self.mark_as_clean();
         self.reflow();
     }
@@ -2320,8 +2332,7 @@ impl TextBuffer {
             self.stats.visual_lines = self.stats.logical_lines;
         }
 
-        self.search = None;
-        self.cursor_for_rendering = None;
+        self.recalc_after_content_changed();
     }
 
     /// Undo the last edit operation.
@@ -2435,7 +2446,7 @@ impl TextBuffer {
             }
         }
 
-        self.cursor_for_rendering = None;
+        self.recalc_after_content_changed();
     }
 
     /// For interfacing with ICU.
