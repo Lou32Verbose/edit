@@ -352,6 +352,8 @@ fn draw(ctx: &mut Context, state: &mut State) {
         {
             state.wants_search.kind = StateSearchKind::Replace;
             state.wants_search.focus = true;
+        } else if key == vk::F3 {
+            search_execute(ctx, state, SearchAction::Search);
         } else {
             return;
         }
