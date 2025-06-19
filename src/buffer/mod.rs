@@ -91,6 +91,8 @@ struct HistoryEntry {
     /// [`TextBuffer::stats`] before the change was made.
     stats_before: TextBufferStatistics,
     /// [`GapBuffer::generation`] before the change was made.
+    ///
+    /// **NOTE:** Entries with the same generation are grouped together.
     generation_before: u32,
     /// Logical cursor position where the change took place.
     /// The position is at the start of the changed range.
@@ -154,10 +156,34 @@ struct ActiveEditLineInfo {
     distance_next_line_start: usize,
 }
 
+/// Undo/redo grouping works by recording a set of "overrides",
+/// which are then applied in [`TextBuffer::edit_begin()`].
+/// This allows us to create a group of edits that all share a
+/// common `generation_before` and can be undone/redone together.
+/// This struct stores those overrides.
+struct ActiveEditGroupInfo {
+    /// [`TextBuffer::cursor`] position before the change was made.
+    cursor_before: Point,
+    /// [`TextBuffer::selection`] before the change was made.
+    selection_before: Option<TextBufferSelection>,
+    /// [`TextBuffer::stats`] before the change was made.
+    stats_before: TextBufferStatistics,
+    /// [`GapBuffer::generation`] before the change was made.
+    ///
+    /// **NOTE:** Entries with the same generation are grouped together.
+    generation_before: u32,
+}
+
 /// Char- or word-wise navigation? Your choice.
 pub enum CursorMovement {
     Grapheme,
     Word,
+}
+
+/// See [`TextBuffer::move_selected_lines`].
+pub enum MoveLineDirection {
+    Up,
+    Down,
 }
 
 /// The result of a call to [`TextBuffer::render()`].
@@ -184,6 +210,7 @@ pub struct TextBuffer {
     last_history_type: HistoryType,
     last_save_generation: u32,
 
+    active_edit_group: Option<ActiveEditGroupInfo>,
     active_edit_line_info: Option<ActiveEditLineInfo>,
     active_edit_depth: i32,
     active_edit_off: usize,
@@ -235,6 +262,7 @@ impl TextBuffer {
             last_history_type: HistoryType::Other,
             last_save_generation: 0,
 
+            active_edit_group: None,
             active_edit_line_info: None,
             active_edit_depth: 0,
             active_edit_off: 0,
@@ -2010,6 +2038,7 @@ impl TextBuffer {
 
     fn write(&mut self, text: &[u8], at: Cursor, raw: bool) {
         let history_type = if raw { HistoryType::Other } else { HistoryType::Write };
+        let mut edit_begun = false;
 
         // If we have an active selection, writing an empty `text`
         // will still delete the selection. As such, we check this first.
@@ -2017,19 +2046,20 @@ impl TextBuffer {
             self.edit_begin(history_type, beg);
             self.edit_delete(end);
             self.set_selection(None);
+            edit_begun = true;
         }
 
         // If the text is empty the remaining code won't do anything,
         // allowing us to exit early.
         if text.is_empty() {
             // ...we still need to end any active edit session though.
-            if self.active_edit_depth > 0 {
+            if edit_begun {
                 self.edit_end();
             }
             return;
         }
 
-        if self.active_edit_depth <= 0 {
+        if !edit_begun {
             self.edit_begin(history_type, at);
         }
 
@@ -2238,73 +2268,142 @@ impl TextBuffer {
     /// * The cursor movement at the end is rather costly, but at least without word wrap
     ///   it should be possible to calculate it directly from the removed amount.
     pub fn unindent(&mut self) {
+        let selection = self.selection;
         let mut selection_beg = self.cursor.logical_pos;
         let mut selection_end = selection_beg;
 
-        if let Some(TextBufferSelection { beg, end }) = self.selection {
-            selection_beg = beg;
-            selection_end = end;
+        if let Some(TextBufferSelection { beg, end }) = &selection {
+            selection_beg = *beg;
+            selection_end = *end;
         }
 
-        let [beg, end] = minmax(selection_beg, selection_end);
-        let beg = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg.y });
-        let end = self.cursor_move_to_logical_internal(beg, Point { x: CoordType::MAX, y: end.y });
+        self.edit_begin_grouping();
 
-        let mut replacement = Vec::new();
-        self.buffer.extract_raw(beg.offset..end.offset, &mut replacement, 0);
+        for y in selection_beg.y.min(selection_end.y)..=selection_beg.y.max(selection_end.y) {
+            self.cursor_move_to_logical(Point { x: 0, y });
 
-        let initial_len = replacement.len();
-        let mut offset = 0;
-        let mut y = beg.logical_pos.y;
-
-        loop {
-            if offset >= replacement.len() {
-                break;
-            }
-
+            let mut offset = self.cursor.offset;
+            let mut width = 0;
             let mut remove = 0;
 
-            if replacement[offset] == b'\t' {
-                remove = 1;
-            } else {
-                while remove < self.tab_size as usize
-                    && offset + remove < replacement.len()
-                    && replacement[offset + remove] == b' '
-                {
+            // Figure out how many characters to `remove`.
+            'outer: loop {
+                let chunk = self.read_forward(offset);
+                if chunk.is_empty() {
+                    break;
+                }
+
+                for &c in chunk {
+                    width += match c {
+                        b' ' => 1,
+                        b'\t' => self.tab_size,
+                        _ => COORD_TYPE_SAFE_MAX,
+                    };
+                    if width > self.tab_size {
+                        break 'outer;
+                    }
                     remove += 1;
+                }
+
+                offset += chunk.len();
+
+                // No need to do another round if we
+                // already got the exact right amount.
+                if width >= self.tab_size {
+                    break 'outer;
                 }
             }
 
             if remove > 0 {
-                replacement.drain(offset..offset + remove);
-            }
+                // As the lines get unindented, the selection should shift with them.
+                if y == selection_beg.y {
+                    selection_beg.x -= remove;
+                }
+                if y == selection_end.y {
+                    selection_end.x -= remove;
+                }
 
-            if y == selection_beg.y {
-                selection_beg.x -= remove as CoordType;
+                self.delete(CursorMovement::Grapheme, remove);
             }
-            if y == selection_end.y {
-                selection_end.x -= remove as CoordType;
-            }
-
-            (offset, y) = simd::lines_fwd(&replacement, offset, y, y + 1);
         }
+        self.edit_end_grouping();
 
-        if replacement.len() == initial_len {
-            // Nothing to do.
+        // Move the cursor to the new end of the selection.
+        self.set_cursor_internal(self.cursor_move_to_logical_internal(self.cursor, selection_end));
+
+        // NOTE: If the selection was previously `None`,
+        // it should continue to be `None` after this.
+        self.set_selection(
+            selection.map(|_| TextBufferSelection { beg: selection_beg, end: selection_end }),
+        );
+    }
+
+    /// Displaces the current, cursor or the selection, line(s) in the given direction.
+    pub fn move_selected_lines(&mut self, direction: MoveLineDirection) {
+        let selection = self.selection;
+        let cursor = self.cursor;
+
+        // If there's no selection, we move the line the cursor is on instead.
+        let [beg, end] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [cursor.logical_pos.y, cursor.logical_pos.y],
+        };
+
+        // Check if this would be a no-op.
+        if match direction {
+            MoveLineDirection::Up => beg <= 0,
+            MoveLineDirection::Down => end >= self.stats.logical_lines - 1,
+        } {
             return;
         }
 
-        self.edit_begin(HistoryType::Other, beg);
-        self.edit_delete(end);
-        self.edit_write(&replacement);
-        self.edit_end();
+        let delta = match direction {
+            MoveLineDirection::Up => -1,
+            MoveLineDirection::Down => 1,
+        };
+        let (cut, paste) = match direction {
+            MoveLineDirection::Up => (beg - 1, end),
+            MoveLineDirection::Down => (end + 1, beg),
+        };
 
-        if let Some(TextBufferSelection { beg, end }) = &mut self.selection {
-            *beg = selection_beg;
-            *end = selection_end;
+        self.edit_begin_grouping();
+        {
+            // Let's say this is `MoveLineDirection::Up`.
+            // In that case, we'll cut (remove) the line above the selection here...
+            self.cursor_move_to_logical(Point { x: 0, y: cut });
+            let line = self.extract_selection(true);
+
+            // ...and paste it below the selection. This will then
+            // appear to the user as if the selection was moved up.
+            self.cursor_move_to_logical(Point { x: 0, y: paste });
+            self.edit_begin(HistoryType::Write, self.cursor);
+            // The `extract_selection` call can return an empty `Vec`),
+            // if the `cut` line was at the end of the file. Since we want to
+            // paste the line somewhere it needs a trailing newline at the minimum.
+            //
+            // Similarly, if the `paste` line is at the end of the file
+            // and there's no trailing newline, we'll have failed to reach
+            // that end in which case `logical_pos.y != past`.
+            if line.is_empty() || self.cursor.logical_pos.y != paste {
+                self.write_canon(b"\n");
+            }
+            if !line.is_empty() {
+                self.write_raw(&line);
+            }
+            self.edit_end();
         }
+        self.edit_end_grouping();
 
-        self.set_cursor_internal(self.cursor_move_to_logical_internal(self.cursor, selection_end));
+        // Shift the cursor and selection together with the moved lines.
+        self.cursor_move_to_logical(Point {
+            x: cursor.logical_pos.x,
+            y: cursor.logical_pos.y + delta,
+        });
+        self.set_selection(selection.map(|mut s| {
+            s.beg.y += delta;
+            s.end.y += delta;
+            s
+        }));
     }
 
     /// Extracts the contents of the current selection.
@@ -2378,6 +2477,19 @@ impl TextBuffer {
         if beg.offset < end.offset { Some((beg, end)) } else { None }
     }
 
+    fn edit_begin_grouping(&mut self) {
+        self.active_edit_group = Some(ActiveEditGroupInfo {
+            cursor_before: self.cursor.logical_pos,
+            selection_before: self.selection,
+            stats_before: self.stats,
+            generation_before: self.buffer.generation(),
+        });
+    }
+
+    fn edit_end_grouping(&mut self) {
+        self.active_edit_group = None;
+    }
+
     /// Starts a new edit operation.
     /// This is used for tracking the undo/redo history.
     fn edit_begin(&mut self, history_type: HistoryType, cursor: Cursor) {
@@ -2390,7 +2502,8 @@ impl TextBuffer {
         self.set_cursor_internal(cursor);
 
         // If both the last and this are a Write/Delete operation, we skip allocating a new undo history item.
-        if history_type != self.last_history_type
+        if cursor_before.offset != cursor.offset
+            || history_type != self.last_history_type
             || !matches!(history_type, HistoryType::Write | HistoryType::Delete)
         {
             self.redo_stack.clear();
@@ -2408,6 +2521,16 @@ impl TextBuffer {
                 deleted: Vec::new(),
                 added: Vec::new(),
             }));
+
+            if let Some(info) = &self.active_edit_group
+                && let Some(entry) = self.undo_stack.back()
+            {
+                let mut entry = entry.borrow_mut();
+                entry.cursor_before = info.cursor_before;
+                entry.selection_before = info.selection_before;
+                entry.stats_before = info.stats_before;
+                entry.generation_before = info.generation_before;
+            }
         }
 
         self.active_edit_off = cursor.offset;
@@ -2461,9 +2584,12 @@ impl TextBuffer {
         let mut out_off = usize::MAX;
 
         let mut undo = self.undo_stack.back_mut().unwrap().borrow_mut();
+
+        // If this is a continued backspace operation,
+        // we need to prepend the deleted portion to the undo entry.
         if self.cursor.logical_pos < undo.cursor {
-            out_off = 0; // Prepend the deleted portion.
-            undo.cursor = self.cursor.logical_pos; // Note the start of the deleted portion.
+            out_off = 0;
+            undo.cursor = self.cursor.logical_pos;
         }
 
         // Copy the deleted portion into the undo entry.
@@ -2481,7 +2607,7 @@ impl TextBuffer {
     /// and recalculates the line statistics.
     fn edit_end(&mut self) {
         self.active_edit_depth -= 1;
-        assert!(self.active_edit_depth >= 0);
+        debug_assert!(self.active_edit_depth >= 0);
         if self.active_edit_depth > 0 {
             return;
         }
@@ -2536,107 +2662,124 @@ impl TextBuffer {
     }
 
     fn undo_redo(&mut self, undo: bool) {
-        // Transfer the last entry from the undo stack to the redo stack or vice versa.
-        {
-            let (from, to) = if undo {
-                (&mut self.undo_stack, &mut self.redo_stack)
-            } else {
-                (&mut self.redo_stack, &mut self.undo_stack)
-            };
+        let buffer_generation = self.buffer.generation();
+        let mut entry_buffer_generation = None;
 
-            let Some(list) = from.cursor_back_mut().remove_current_as_list() else {
-                return;
-            };
-
-            to.cursor_back_mut().splice_after(list);
-        }
-
-        let change = {
-            let to = if undo { &self.redo_stack } else { &self.undo_stack };
-            to.back().unwrap()
-        };
-
-        // Move to the point where the modification took place.
-        let cursor = self.cursor_move_to_logical_internal(self.cursor, change.borrow().cursor);
-
-        let safe_cursor = if self.word_wrap_column > 0 {
-            // If word-wrap is enabled, we need to move the cursor to the beginning of the line.
-            // This is because the undo/redo operation may have changed the visual position of the cursor.
-            self.goto_line_start(cursor, cursor.logical_pos.y)
-        } else {
-            cursor
-        };
-
-        {
-            let buffer_generation = self.buffer.generation();
-            let mut change = change.borrow_mut();
-            let change = &mut *change;
-
-            // Undo: Whatever was deleted is now added and vice versa.
-            mem::swap(&mut change.deleted, &mut change.added);
-
-            // Delete the inserted portion.
-            self.buffer.allocate_gap(cursor.offset, 0, change.deleted.len());
-
-            // Reinsert the deleted portion.
+        loop {
+            // Transfer the last entry from the undo stack to the redo stack or vice versa.
             {
-                let added = &change.added[..];
-                let mut beg = 0;
-                let mut offset = cursor.offset;
+                let (from, to) = if undo {
+                    (&mut self.undo_stack, &mut self.redo_stack)
+                } else {
+                    (&mut self.redo_stack, &mut self.undo_stack)
+                };
 
-                while beg < added.len() {
-                    let (end, line) = simd::lines_fwd(added, beg, 0, 1);
-                    let has_newline = line != 0;
-                    let link = &added[beg..end];
-                    let line = unicode::strip_newline(link);
-                    let mut written;
+                if let Some(g) = entry_buffer_generation
+                    && from.back().is_none_or(|c| c.borrow().generation_before != g)
+                {
+                    break;
+                }
 
-                    {
-                        let gap = self.buffer.allocate_gap(offset, line.len() + 2, 0);
-                        written = slice_copy_safe(gap, line);
+                let Some(list) = from.cursor_back_mut().remove_current_as_list() else {
+                    break;
+                };
 
-                        if has_newline {
-                            if self.newlines_are_crlf && written < gap.len() {
-                                gap[written] = b'\r';
-                                written += 1;
+                to.cursor_back_mut().splice_after(list);
+            }
+
+            let change = {
+                let to = if undo { &self.redo_stack } else { &self.undo_stack };
+                to.back().unwrap()
+            };
+
+            // Remember the buffer generation of the change so we can stop popping undos/redos.
+            // Also, move to the point where the modification took place.
+            let cursor = {
+                let change = change.borrow();
+                entry_buffer_generation = Some(change.generation_before);
+                self.cursor_move_to_logical_internal(self.cursor, change.cursor)
+            };
+
+            let safe_cursor = if self.word_wrap_column > 0 {
+                // If word-wrap is enabled, we need to move the cursor to the beginning of the line.
+                // This is because the undo/redo operation may have changed the visual position of the cursor.
+                self.goto_line_start(cursor, cursor.logical_pos.y)
+            } else {
+                cursor
+            };
+
+            {
+                let mut change = change.borrow_mut();
+                let change = &mut *change;
+
+                // Undo: Whatever was deleted is now added and vice versa.
+                mem::swap(&mut change.deleted, &mut change.added);
+
+                // Delete the inserted portion.
+                self.buffer.allocate_gap(cursor.offset, 0, change.deleted.len());
+
+                // Reinsert the deleted portion.
+                {
+                    let added = &change.added[..];
+                    let mut beg = 0;
+                    let mut offset = cursor.offset;
+
+                    while beg < added.len() {
+                        let (end, line) = simd::lines_fwd(added, beg, 0, 1);
+                        let has_newline = line != 0;
+                        let link = &added[beg..end];
+                        let line = unicode::strip_newline(link);
+                        let mut written;
+
+                        {
+                            let gap = self.buffer.allocate_gap(offset, line.len() + 2, 0);
+                            written = slice_copy_safe(gap, line);
+
+                            if has_newline {
+                                if self.newlines_are_crlf && written < gap.len() {
+                                    gap[written] = b'\r';
+                                    written += 1;
+                                }
+                                if written < gap.len() {
+                                    gap[written] = b'\n';
+                                    written += 1;
+                                }
                             }
-                            if written < gap.len() {
-                                gap[written] = b'\n';
-                                written += 1;
-                            }
+
+                            self.buffer.commit_gap(written);
                         }
 
-                        self.buffer.commit_gap(written);
+                        beg = end;
+                        offset += written;
                     }
-
-                    beg = end;
-                    offset += written;
                 }
-            }
 
-            // Restore the previous line statistics.
-            mem::swap(&mut self.stats, &mut change.stats_before);
+                // Restore the previous line statistics.
+                mem::swap(&mut self.stats, &mut change.stats_before);
 
-            // Restore the previous selection.
-            mem::swap(&mut self.selection, &mut change.selection_before);
+                // Restore the previous selection.
+                mem::swap(&mut self.selection, &mut change.selection_before);
 
-            // Pretend as if the buffer was never modified.
-            self.buffer.set_generation(change.generation_before);
-            change.generation_before = buffer_generation;
+                // Pretend as if the buffer was never modified.
+                self.buffer.set_generation(change.generation_before);
+                change.generation_before = buffer_generation;
 
-            // Restore the previous cursor.
-            let cursor_before =
-                self.cursor_move_to_logical_internal(safe_cursor, change.cursor_before);
-            change.cursor_before = self.cursor.logical_pos;
-            // Can't use `set_cursor_internal` here, because we haven't updated the line stats yet.
-            self.cursor = cursor_before;
+                // Restore the previous cursor.
+                let cursor_before =
+                    self.cursor_move_to_logical_internal(safe_cursor, change.cursor_before);
+                change.cursor_before = self.cursor.logical_pos;
+                // Can't use `set_cursor_internal` here, because we haven't updated the line stats yet.
+                self.cursor = cursor_before;
 
-            if self.undo_stack.is_empty() {
-                self.last_history_type = HistoryType::Other;
+                if self.undo_stack.is_empty() {
+                    self.last_history_type = HistoryType::Other;
+                }
             }
         }
 
-        self.recalc_after_content_changed();
+        if entry_buffer_generation.is_some() {
+            self.recalc_after_content_changed();
+        }
     }
 
     /// For interfacing with ICU.
