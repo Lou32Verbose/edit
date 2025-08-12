@@ -226,19 +226,29 @@ fn handle_args(state: &mut State) -> apperr::Result<bool> {
     let scratch = scratch_arena(None);
     let mut paths: Vec<PathBuf, &Arena> = Vec::new_in(&*scratch);
     let mut cwd = env::current_dir()?;
+    let mut parse_args = true;
 
     // The best CLI argument parser in the world.
     for arg in env::args_os().skip(1) {
-        if arg == "-h" || arg == "--help" || (cfg!(windows) && arg == "/?") {
-            print_help();
-            return Ok(true);
-        } else if arg == "-v" || arg == "--version" {
-            print_version();
-            return Ok(true);
-        } else if arg == "-" {
-            paths.clear();
-            break;
+        if parse_args {
+            if arg == "--" {
+                parse_args = false;
+                continue;
+            }
+            if arg == "-" {
+                paths.clear();
+                break;
+            }
+            if arg == "-h" || arg == "--help" || (cfg!(windows) && arg == "/?") {
+                print_help();
+                return Ok(true);
+            }
+            if arg == "-v" || arg == "--version" {
+                print_version();
+                return Ok(true);
+            }
         }
+
         let p = cwd.join(Path::new(&arg));
         let p = path::normalize(&p);
         if !p.is_dir() {
