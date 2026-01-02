@@ -1,9 +1,9 @@
-name: msedit
+name: edit32
 base: core24
 version: '1.2.1'
-summary: Edit is an MS-DOS inspired text editor from Microsoft
+summary: Edit32 is an MS-DOS inspired text editor from Microsoft
 description: |
-  Edit pays homage to the classic MS-DOS Editor, but with a modern interface and input controls similar to VS Code. Learn more at https://github.com/microsoft/edit
+  Edit32 pays homage to the classic MS-DOS Editor, but with a modern interface and input controls similar to VS Code. Learn more at https://github.com/microsoft/edit
 
   Disclaimer: This is an unofficial Snap and it is not endorsed by nor affiliated officially with Microsoft Corporation.
 
@@ -11,8 +11,8 @@ grade: stable
 confinement: strict
 
 apps:
-  msedit:
-    command: bin/edit
+  edit32:
+    command: bin/edit32
     plugs:
       - home
 

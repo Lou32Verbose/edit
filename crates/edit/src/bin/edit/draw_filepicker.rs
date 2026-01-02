@@ -12,6 +12,7 @@ use edit::tui::*;
 use edit::{icu, path};
 use stdext::arena::scratch_arena;
 
+use crate::documents::OpenOutcome;
 use crate::localization::*;
 use crate::state::*;
 
@@ -31,14 +32,12 @@ pub fn draw_file_picker(ctx: &mut Context, state: &mut State) {
     let mut doit = None;
     let mut done = false;
 
-    ctx.modal_begin(
-        "file-picker",
-        if state.wants_file_picker == StateFilePicker::Open {
-            loc(LocId::FileOpen)
-        } else {
-            loc(LocId::FileSaveAs)
-        },
-    );
+    let title = match state.wants_file_picker {
+        StateFilePicker::Open => loc(LocId::FileOpen),
+        StateFilePicker::OpenFolder => "Open Folder",
+        _ => loc(LocId::FileSaveAs),
+    };
+    ctx.modal_begin("file-picker", title);
     ctx.attr_intrinsic_size(Size { width, height });
     {
         let contains_focus = ctx.contains_focus();
@@ -63,6 +62,7 @@ pub fn draw_file_picker(ctx: &mut Context, state: &mut State) {
 
             let name_changed = ctx.editline("name", &mut state.file_picker_pending_name);
             ctx.inherit_focus();
+            ctx.focus_on_first_present();
 
             if ctx.contains_focus() {
                 if name_changed && ctx.is_focused() {
@@ -209,12 +209,13 @@ pub fn draw_file_picker(ctx: &mut Context, state: &mut State) {
             ctx.inherit_focus();
             ctx.attr_padding(Rect::three(0, 2, 1));
             ctx.attr_position(Position::Center);
-            ctx.table_set_cell_gap(Size { width: 2, height: 0 });
-            {
-                ctx.table_next_row();
-                ctx.inherit_focus();
+        ctx.table_set_cell_gap(Size { width: 2, height: 0 });
+        {
+            ctx.table_next_row();
+            ctx.inherit_focus();
+            ctx.focus_on_first_present();
 
-                save = ctx.button("yes", loc(LocId::Yes), ButtonStyle::default());
+            save = ctx.button("yes", loc(LocId::Yes), ButtonStyle::default());
                 ctx.inherit_focus();
 
                 if ctx.button("no", loc(LocId::No), ButtonStyle::default()) {
@@ -241,7 +242,23 @@ pub fn draw_file_picker(ctx: &mut Context, state: &mut State) {
 
     if let Some(path) = doit {
         let res = if state.wants_file_picker == StateFilePicker::Open {
-            state.documents.add_file_path(&path).map(|_| ())
+            match state.documents.add_file_path(&path, &state.settings) {
+                Ok(OpenOutcome::Opened) => {
+                    push_recent_file(state, path);
+                    Ok(())
+                }
+                Ok(OpenOutcome::BinaryDetected { path, goto }) => {
+                    state.wants_binary_prompt = true;
+                    state.binary_prompt_path = Some(path);
+                    state.binary_prompt_goto = goto;
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        } else if state.wants_file_picker == StateFilePicker::OpenFolder {
+            state.open_folder = Some(path.clone());
+            push_recent_folder(state, path);
+            Ok(())
         } else if let Some(doc) = state.documents.active_mut() {
             doc.save(Some(path))
         } else {
@@ -272,6 +289,9 @@ fn draw_file_picker_update_path(state: &mut State) -> Option<PathBuf> {
     let path = path::normalize(&path);
 
     let (dir, name) = if path.is_dir() {
+        if state.wants_file_picker == StateFilePicker::OpenFolder {
+            return Some(path);
+        }
         // If the current path is C:\ and the user selects "..", we want to
         // navigate to the drive picker. Since `path::normalize` will turn C:\.. into C:\,
         // we can detect this by checking if the length of the path didn't change.
@@ -298,6 +318,9 @@ fn draw_file_picker_update_path(state: &mut State) -> Option<PathBuf> {
     }
 
     state.file_picker_pending_name = name;
+    if state.wants_file_picker == StateFilePicker::OpenFolder {
+        return None;
+    }
     if state.file_picker_pending_name.as_os_str().is_empty() { None } else { Some(path) }
 }
 

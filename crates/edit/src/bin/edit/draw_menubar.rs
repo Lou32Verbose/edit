@@ -2,10 +2,11 @@
 // Licensed under the MIT License.
 
 use edit::helpers::*;
-use edit::input::{kbmod, vk};
+use edit::input::vk;
 use edit::tui::*;
 use stdext::arena_format;
 
+use crate::commands;
 use crate::localization::*;
 use crate::state::*;
 
@@ -38,24 +39,64 @@ pub fn draw_menubar(ctx: &mut Context, state: &mut State) {
 }
 
 fn draw_menu_file(ctx: &mut Context, state: &mut State) {
-    if ctx.menubar_menu_button(loc(LocId::FileNew), 'N', kbmod::CTRL | vk::N) {
+    if ctx.menubar_menu_button(
+        loc(LocId::FileNew),
+        'N',
+        state.keybindings.shortcut(commands::CommandId::FileNew),
+    ) {
         draw_add_untitled_document(ctx, state);
     }
-    if ctx.menubar_menu_button(loc(LocId::FileOpen), 'O', kbmod::CTRL | vk::O) {
+    if ctx.menubar_menu_button(
+        loc(LocId::FileOpen),
+        'O',
+        state.keybindings.shortcut(commands::CommandId::FileOpen),
+    ) {
         state.wants_file_picker = StateFilePicker::Open;
     }
+    if ctx.menubar_menu_button(
+        "Open Folder",
+        'F',
+        state.keybindings.shortcut(commands::CommandId::FileOpenFolder),
+    ) {
+        state.wants_file_picker = StateFilePicker::OpenFolder;
+    }
+    if ctx.menubar_menu_button(
+        "Open Recent Folder",
+        'R',
+        state.keybindings.shortcut(commands::CommandId::FileOpenRecentFolder),
+    ) {
+        state.wants_quick_switcher = true;
+        state.quick_switcher_query = "folder:".to_string();
+        state.quick_switcher_selected = 0;
+    }
     if state.documents.active().is_some() {
-        if ctx.menubar_menu_button(loc(LocId::FileSave), 'S', kbmod::CTRL | vk::S) {
+        if ctx.menubar_menu_button(
+            loc(LocId::FileSave),
+            'S',
+            state.keybindings.shortcut(commands::CommandId::FileSave),
+        ) {
             state.wants_save = true;
         }
-        if ctx.menubar_menu_button(loc(LocId::FileSaveAs), 'A', vk::NULL) {
+        if ctx.menubar_menu_button(
+            loc(LocId::FileSaveAs),
+            'A',
+            state.keybindings.shortcut(commands::CommandId::FileSaveAs),
+        ) {
             state.wants_file_picker = StateFilePicker::SaveAs;
         }
-        if ctx.menubar_menu_button(loc(LocId::FileClose), 'C', kbmod::CTRL | vk::W) {
+        if ctx.menubar_menu_button(
+            loc(LocId::FileClose),
+            'C',
+            state.keybindings.shortcut(commands::CommandId::FileClose),
+        ) {
             state.wants_close = true;
         }
     }
-    if ctx.menubar_menu_button(loc(LocId::FileExit), 'X', kbmod::CTRL | vk::Q) {
+    if ctx.menubar_menu_button(
+        loc(LocId::FileExit),
+        'X',
+        state.keybindings.shortcut(commands::CommandId::FileExit),
+    ) {
         state.wants_exit = true;
     }
     ctx.menubar_menu_end();
@@ -65,37 +106,76 @@ fn draw_menu_edit(ctx: &mut Context, state: &mut State) {
     let doc = state.documents.active().unwrap();
     let mut tb = doc.buffer.borrow_mut();
 
-    if ctx.menubar_menu_button(loc(LocId::EditUndo), 'U', kbmod::CTRL | vk::Z) {
+    if ctx.menubar_menu_button(
+        loc(LocId::EditUndo),
+        'U',
+        state.keybindings.shortcut(commands::CommandId::EditUndo),
+    ) {
         tb.undo();
         ctx.needs_rerender();
     }
-    if ctx.menubar_menu_button(loc(LocId::EditRedo), 'R', kbmod::CTRL | vk::Y) {
+    if ctx.menubar_menu_button(
+        loc(LocId::EditRedo),
+        'R',
+        state.keybindings.shortcut(commands::CommandId::EditRedo),
+    ) {
         tb.redo();
         ctx.needs_rerender();
     }
-    if ctx.menubar_menu_button(loc(LocId::EditCut), 'T', kbmod::CTRL | vk::X) {
+    if ctx.menubar_menu_button(
+        loc(LocId::EditCut),
+        'T',
+        state.keybindings.shortcut(commands::CommandId::EditCut),
+    ) {
         tb.cut(ctx.clipboard_mut());
         ctx.needs_rerender();
     }
-    if ctx.menubar_menu_button(loc(LocId::EditCopy), 'C', kbmod::CTRL | vk::C) {
+    if ctx.menubar_menu_button(
+        loc(LocId::EditCopy),
+        'C',
+        state.keybindings.shortcut(commands::CommandId::EditCopy),
+    ) {
         tb.copy(ctx.clipboard_mut());
         ctx.needs_rerender();
     }
-    if ctx.menubar_menu_button(loc(LocId::EditPaste), 'P', kbmod::CTRL | vk::V) {
+    if ctx.menubar_menu_button(
+        loc(LocId::EditPaste),
+        'P',
+        state.keybindings.shortcut(commands::CommandId::EditPaste),
+    ) {
         tb.paste(ctx.clipboard_ref());
         ctx.needs_rerender();
     }
     if state.wants_search.kind != StateSearchKind::Disabled {
-        if ctx.menubar_menu_button(loc(LocId::EditFind), 'F', kbmod::CTRL | vk::F) {
+        if ctx.menubar_menu_button(
+            loc(LocId::EditFind),
+            'F',
+            state.keybindings.shortcut(commands::CommandId::EditFind),
+        ) {
             state.wants_search.kind = StateSearchKind::Search;
             state.wants_search.focus = true;
         }
-        if ctx.menubar_menu_button(loc(LocId::EditReplace), 'L', kbmod::CTRL | vk::R) {
+        if ctx.menubar_menu_button(
+            loc(LocId::EditReplace),
+            'L',
+            state.keybindings.shortcut(commands::CommandId::EditReplace),
+        ) {
             state.wants_search.kind = StateSearchKind::Replace;
             state.wants_search.focus = true;
         }
     }
-    if ctx.menubar_menu_button(loc(LocId::EditSelectAll), 'A', kbmod::CTRL | vk::A) {
+    if ctx.menubar_menu_button(
+        "Find in Files",
+        'I',
+        state.keybindings.shortcut(commands::CommandId::FindInFiles),
+    ) {
+        state.wants_find_in_files = true;
+    }
+    if ctx.menubar_menu_button(
+        loc(LocId::EditSelectAll),
+        'A',
+        state.keybindings.shortcut(commands::CommandId::EditSelectAll),
+    ) {
         tb.select_all();
         ctx.needs_rerender();
     }
@@ -104,22 +184,72 @@ fn draw_menu_edit(ctx: &mut Context, state: &mut State) {
 
 fn draw_menu_view(ctx: &mut Context, state: &mut State) {
     if let Some(doc) = state.documents.active() {
-        let mut tb = doc.buffer.borrow_mut();
-        let word_wrap = tb.is_word_wrap_enabled();
+        {
+            let mut tb = doc.buffer.borrow_mut();
+            let word_wrap = tb.is_word_wrap_enabled();
 
-        // All values on the statusbar are currently document specific.
-        if ctx.menubar_menu_button(loc(LocId::ViewFocusStatusbar), 'S', vk::NULL) {
-            state.wants_statusbar_focus = true;
+            // All values on the statusbar are currently document specific.
+            if ctx.menubar_menu_button(loc(LocId::ViewFocusStatusbar), 'S', vk::NULL) {
+                state.wants_statusbar_focus = true;
+            }
+            if ctx.menubar_menu_button(
+                loc(LocId::ViewGoToFile),
+                'F',
+                state.keybindings.shortcut(commands::CommandId::ViewGoToFile),
+            ) {
+                state.wants_go_to_file = true;
+            }
+            if ctx.menubar_menu_button(
+                "Quick Switcher",
+                'Q',
+                state.keybindings.shortcut(commands::CommandId::QuickSwitcher),
+            ) {
+                state.wants_quick_switcher = true;
+                state.quick_switcher_selected = 0;
+            }
+            if ctx.menubar_menu_button(
+                loc(LocId::FileGoto),
+                'G',
+                state.keybindings.shortcut(commands::CommandId::FileGoto),
+            ) {
+                state.wants_goto = true;
+            }
+            if ctx.menubar_menu_checkbox(
+                loc(LocId::ViewWordWrap),
+                'W',
+                state.keybindings.shortcut(commands::CommandId::ViewWordWrap),
+                word_wrap,
+            ) {
+                tb.set_word_wrap(!word_wrap);
+                ctx.needs_rerender();
+            }
         }
-        if ctx.menubar_menu_button(loc(LocId::ViewGoToFile), 'F', kbmod::CTRL | vk::P) {
-            state.wants_go_to_file = true;
-        }
-        if ctx.menubar_menu_button(loc(LocId::FileGoto), 'G', kbmod::CTRL | vk::G) {
-            state.wants_goto = true;
-        }
-        if ctx.menubar_menu_checkbox(loc(LocId::ViewWordWrap), 'W', kbmod::ALT | vk::Z, word_wrap) {
-            tb.set_word_wrap(!word_wrap);
+        if ctx.menubar_menu_checkbox(
+            "High Contrast",
+            'H',
+            vk::NULL,
+            state.settings.high_contrast,
+        ) {
+            state.settings.high_contrast = !state.settings.high_contrast;
+            state.needs_theme_refresh = true;
             ctx.needs_rerender();
+        }
+        if ctx.menubar_menu_button(
+            "Edit Keybindings",
+            'K',
+            state.keybindings.shortcut(commands::CommandId::SettingsEditKeybindings),
+        ) {
+            state.wants_keybinding_editor = true;
+        }
+        if ctx.menubar_menu_begin("Theme", 'T') {
+            draw_menu_theme(ctx, state);
+        }
+        if ctx.menubar_menu_button(
+            "Command Palette",
+            'P',
+            state.keybindings.shortcut(commands::CommandId::CommandPalette),
+        ) {
+            state.wants_command_palette = true;
         }
     }
 
@@ -129,6 +259,45 @@ fn draw_menu_view(ctx: &mut Context, state: &mut State) {
 fn draw_menu_help(ctx: &mut Context, state: &mut State) {
     if ctx.menubar_menu_button(loc(LocId::HelpAbout), 'A', vk::NULL) {
         state.wants_about = true;
+    }
+    if ctx.menubar_menu_button(
+        "Context Help",
+        'C',
+        state.keybindings.shortcut(commands::CommandId::HelpContext),
+    ) {
+        state.wants_context_help = true;
+    }
+    if ctx.menubar_menu_button(
+        "Quick Start",
+        'Q',
+        state.keybindings.shortcut(commands::CommandId::HelpQuickStart),
+    ) {
+        state.wants_quick_start = true;
+    }
+    ctx.menubar_menu_end();
+}
+
+fn draw_menu_theme(ctx: &mut Context, state: &mut State) {
+    if ctx.menubar_menu_button(
+        "Theme Picker",
+        'P',
+        state.keybindings.shortcut(commands::CommandId::ThemePicker),
+    ) {
+        state.wants_theme_picker = true;
+    }
+    if ctx.menubar_menu_button(
+        "Cycle Theme",
+        'C',
+        state.keybindings.shortcut(commands::CommandId::SettingsThemeCycle),
+    ) {
+        commands::run_command(ctx, state, commands::CommandId::SettingsThemeCycle);
+    }
+    if ctx.menubar_menu_button(
+        "Previous Theme",
+        'P',
+        state.keybindings.shortcut(commands::CommandId::SettingsThemePrevious),
+    ) {
+        commands::run_command(ctx, state, commands::CommandId::SettingsThemePrevious);
     }
     ctx.menubar_menu_end();
 }
@@ -140,7 +309,7 @@ pub fn draw_dialog_about(ctx: &mut Context, state: &mut State) {
         ctx.inherit_focus();
         ctx.attr_padding(Rect::three(1, 2, 1));
         {
-            ctx.label("description", "Microsoft Edit");
+            ctx.label("title", "Edit32 - Quick Help");
             ctx.attr_overflow(Overflow::TruncateTail);
             ctx.attr_position(Position::Center);
 
@@ -156,15 +325,37 @@ pub fn draw_dialog_about(ctx: &mut Context, state: &mut State) {
             ctx.attr_overflow(Overflow::TruncateHead);
             ctx.attr_position(Position::Center);
 
-            ctx.label("copyright", "Copyright (c) Microsoft Corp 2025");
+            ctx.label("blurb", "A simple editor for simple needs.");
             ctx.attr_overflow(Overflow::TruncateTail);
             ctx.attr_position(Position::Center);
+
+            ctx.block_begin("shortcuts");
+            ctx.attr_padding(Rect::three(1, 0, 0));
+            {
+                ctx.label("shortcuts-title", "Shortcuts");
+                ctx.attr_overflow(Overflow::TruncateTail);
+
+                ctx.label("shortcut-1", "F1: Command Palette");
+                ctx.label("shortcut-2", "Ctrl+N: New");
+                ctx.label("shortcut-3", "Ctrl+O: Open");
+                ctx.label("shortcut-4", "Ctrl+S: Save");
+                ctx.label("shortcut-5", "Ctrl+F: Find");
+                ctx.label("shortcut-6", "Ctrl+R: Replace");
+                ctx.label("shortcut-7", "F4: Find in Files");
+                ctx.label("shortcut-8", "Ctrl+G: Go to Line");
+                ctx.label("shortcut-9", "Ctrl+P: Go to File");
+                ctx.label("shortcut-10", "Alt+Z: Word Wrap");
+                ctx.label("shortcut-11", "Ctrl+W: Close");
+                ctx.label("shortcut-12", "Ctrl+Q: Exit");
+            }
+            ctx.block_end();
 
             ctx.block_begin("choices");
             ctx.inherit_focus();
             ctx.attr_padding(Rect::three(1, 2, 0));
             ctx.attr_position(Position::Center);
             {
+                ctx.focus_on_first_present();
                 if ctx.button("ok", loc(LocId::Ok), ButtonStyle::default()) {
                     state.wants_about = false;
                 }

@@ -3,8 +3,9 @@
 
 use std::ffi::{OsString, c_char, c_void};
 use std::fmt::Write as _;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::mem::MaybeUninit;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull, null, null_mut};
@@ -484,6 +485,67 @@ pub fn file_id(file: Option<&File>, path: &Path) -> apperr::Result<FileId> {
     file_id_from_handle(file).or_else(|_| Ok(FileId::Path(std::fs::canonicalize(path)?)))
 }
 
+pub fn atomic_write<F>(path: &Path, write: F) -> apperr::Result<()>
+where
+    F: FnOnce(&mut File) -> apperr::Result<()>,
+{
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("edit32"));
+    let perms = fs::metadata(path).ok().map(|meta| meta.permissions());
+
+    let mut attempt = 0u32;
+    let (temp_path, mut temp_file) = loop {
+        attempt = attempt.wrapping_add(1);
+        let mut name = OsString::from(file_name);
+        name.push(".tmp-");
+        name.push(format!("{}-{}", std::process::id(), attempt));
+        let candidate = parent.join(name);
+
+        match OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    };
+
+    let write_result = write(&mut temp_file);
+    let sync_result = temp_file.sync_all();
+    drop(temp_file);
+
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    if let Err(err) = sync_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+
+    if let Some(perms) = perms {
+        let _ = fs::set_permissions(&temp_path, perms);
+    }
+
+    let src = path_to_wide(&temp_path);
+    let dst = path_to_wide(path);
+    let moved = unsafe {
+        FileSystem::MoveFileExW(
+            src.as_ptr(),
+            dst.as_ptr(),
+            FileSystem::MOVEFILE_REPLACE_EXISTING | FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        let _ = fs::remove_file(&temp_path);
+        return Err(get_last_error());
+    }
+
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
+    Ok(())
+}
+
 fn file_id_from_handle(file: &File) -> apperr::Result<FileId> {
     unsafe {
         let mut info = MaybeUninit::<FileSystem::FILE_ID_INFO>::uninit();
@@ -514,6 +576,10 @@ pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     let path = unsafe { OsString::from_encoded_bytes_unchecked(path) };
     let path = PathBuf::from(path);
     Ok(path)
+}
+
+fn path_to_wide(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
 unsafe fn get_module(name: *const u16) -> apperr::Result<NonNull<c_void>> {

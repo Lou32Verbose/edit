@@ -1,0 +1,7 @@
+# GraphQL sample
+query GetWidgets {
+  widgets {
+    id
+    name
+  }
+}

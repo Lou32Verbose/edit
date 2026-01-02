@@ -3,6 +3,7 @@
 
 use std::num::ParseIntError;
 
+use edit::buffer;
 use edit::framebuffer::IndexedColor;
 use edit::helpers::*;
 use edit::icu;
@@ -11,6 +12,7 @@ use edit::tui::*;
 
 use crate::localization::*;
 use crate::state::*;
+use std::path::PathBuf;
 
 pub fn draw_editor(ctx: &mut Context, state: &mut State) {
     if !matches!(state.wants_search.kind, StateSearchKind::Hidden | StateSearchKind::Disabled) {
@@ -26,6 +28,16 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
     };
 
     if let Some(doc) = state.documents.active() {
+        {
+            let mut tb = doc.buffer.borrow_mut();
+            if !matches!(state.wants_search.kind, StateSearchKind::Hidden | StateSearchKind::Disabled)
+                && !state.search_needle.trim_ascii().is_empty()
+            {
+                tb.set_search_highlight(&state.search_needle, state.search_options);
+            } else {
+                tb.clear_search_highlight();
+            }
+        }
         ctx.textarea("textarea", doc.buffer.clone());
         ctx.inherit_focus();
     } else {
@@ -65,8 +77,8 @@ fn draw_search(ctx: &mut Context, state: &mut State) {
 
     ctx.block_begin("search");
     ctx.attr_focus_well();
-    ctx.attr_background_rgba(ctx.indexed(IndexedColor::White));
-    ctx.attr_foreground_rgba(ctx.indexed(IndexedColor::Black));
+    ctx.attr_background_rgba(state.editor_color_bg);
+    ctx.attr_foreground_rgba(state.editor_color_fg);
     {
         if ctx.contains_focus() && ctx.consume_shortcut(vk::ESCAPE) {
             state.wants_search.kind = StateSearchKind::Hidden;
@@ -138,11 +150,20 @@ fn draw_search(ctx: &mut Context, state: &mut State) {
                 loc(LocId::SearchUseRegex),
                 &mut state.search_options.use_regex,
             );
-            if state.wants_search.kind == StateSearchKind::Replace
-                && ctx.button("replace-all", loc(LocId::SearchReplaceAll), ButtonStyle::default())
-            {
-                change = true;
-                change_action = Some(SearchAction::ReplaceAll);
+            if state.wants_search.kind == StateSearchKind::Replace {
+                if ctx.button("replace-all", loc(LocId::SearchReplaceAll), ButtonStyle::default()) {
+                    change = true;
+                    change_action = Some(SearchAction::ReplaceAll);
+                }
+                if ctx.button("preview", "Preview", ButtonStyle::default()) {
+                    if let Some(doc) = state.documents.active() {
+                        let (results, status) = build_replace_preview(doc, state);
+                        state.replace_preview_results = results;
+                        state.replace_preview_status = status;
+                        state.replace_preview_in_files = false;
+                        state.wants_replace_preview = true;
+                    }
+                }
             }
             if ctx.button("close", loc(LocId::SearchClose), ButtonStyle::default()) {
                 state.wants_search.kind = StateSearchKind::Hidden;
@@ -192,6 +213,140 @@ pub fn search_execute(ctx: &mut Context, state: &mut State, action: SearchAction
     .is_ok();
 
     ctx.needs_rerender();
+}
+
+fn build_replace_preview(doc: &crate::documents::Document, state: &State) -> (Vec<ReplacePreviewItem>, String) {
+    let needle = state.search_needle.trim_ascii();
+    if needle.is_empty() {
+        return (Vec::new(), "No search text provided.".to_string());
+    }
+    if state.search_options.use_regex {
+        return (Vec::new(), "Preview not available for regex search.".to_string());
+    }
+
+    let mut bytes = Vec::new();
+    {
+        let tb = doc.buffer.borrow();
+        let mut off = 0usize;
+        loop {
+            let chunk = tb.read_forward(off);
+            if chunk.is_empty() {
+                break;
+            }
+            bytes.extend_from_slice(chunk);
+            off += chunk.len();
+        }
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    let path = doc
+        .path
+        .as_ref()
+        .map(|p| DisplayablePathBuf::from_path(p.clone()))
+        .unwrap_or_else(|| DisplayablePathBuf::from_path(PathBuf::from(&doc.filename)));
+
+    let mut results = Vec::new();
+    const MAX_PREVIEW: usize = 200;
+
+    for (line_idx, line) in text.lines().enumerate() {
+        let matches = preview_find_matches(line, needle, state.search_options);
+        if matches.is_empty() {
+            continue;
+        }
+
+        let after = replace_line_with_matches(line, &matches, &state.search_replacement);
+        let column = matches.first().map_or(1, |m| m.start + 1);
+
+        results.push(ReplacePreviewItem {
+            path: path.clone(),
+            line: line_idx + 1,
+            column,
+            before: line.to_string(),
+            after,
+        });
+
+        if results.len() >= MAX_PREVIEW {
+            break;
+        }
+    }
+
+    let status = format!("{} preview item(s)", results.len());
+    (results, status)
+}
+
+fn preview_find_matches(line: &str, needle: &str, options: buffer::SearchOptions) -> Vec<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+
+    let bytes = line.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    if needle_bytes.len() > bytes.len() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    let mut i = 0;
+    while i + needle_bytes.len() <= bytes.len() {
+        if !preview_matches_at(bytes, needle_bytes, i, options.match_case) {
+            i += 1;
+            continue;
+        }
+
+        if options.whole_word && !preview_is_word_boundary(bytes, i, needle_bytes.len()) {
+            i += 1;
+            continue;
+        }
+
+        matches.push(i..(i + needle_bytes.len()));
+        i += needle_bytes.len().max(1);
+    }
+
+    matches
+}
+
+fn preview_matches_at(haystack: &[u8], needle: &[u8], start: usize, match_case: bool) -> bool {
+    for (idx, &b) in needle.iter().enumerate() {
+        let h = haystack[start + idx];
+        if match_case {
+            if h != b {
+                return false;
+            }
+        } else if h.to_ascii_lowercase() != b.to_ascii_lowercase() {
+            return false;
+        }
+    }
+    true
+}
+
+fn preview_is_word_boundary(haystack: &[u8], start: usize, len: usize) -> bool {
+    let left = start.checked_sub(1).map(|i| haystack[i]);
+    let right = haystack.get(start + len).copied();
+
+    let left_ok = left.map_or(true, |b| !preview_is_word_byte(b));
+    let right_ok = right.map_or(true, |b| !preview_is_word_byte(b));
+
+    left_ok && right_ok
+}
+
+fn preview_is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn replace_line_with_matches(line: &str, matches: &[std::ops::Range<usize>], replacement: &str) -> String {
+    if matches.is_empty() {
+        return line.to_string();
+    }
+
+    let mut out = String::new();
+    let mut last = 0;
+    for m in matches {
+        out.push_str(&line[last..m.start]);
+        out.push_str(replacement);
+        last = m.end;
+    }
+    out.push_str(&line[last..]);
+    out
 }
 
 pub fn draw_handle_save(ctx: &mut Context, state: &mut State) {
@@ -249,6 +404,7 @@ pub fn draw_handle_wants_close(ctx: &mut Context, state: &mut State) {
         {
             ctx.table_next_row();
             ctx.inherit_focus();
+            ctx.focus_on_first_present();
 
             if ctx.button(
                 "yes",

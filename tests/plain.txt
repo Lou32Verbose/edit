@@ -1,0 +1,2 @@
+Plain text sample.
+No highlighting should apply here.

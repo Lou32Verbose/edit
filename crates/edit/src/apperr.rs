@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Provides a transparent error type for edit.
+//! Provides a transparent error type for Edit32.
 
 use std::alloc::AllocError;
 use std::{io, result};
@@ -10,10 +10,10 @@ use crate::sys;
 
 pub const APP_ICU_MISSING: Error = Error::new_app(0);
 
-/// Edit's transparent `Result` type.
+/// Edit32's transparent `Result` type.
 pub type Result<T> = result::Result<T, Error>;
 
-/// Edit's transparent `Error` type.
+/// Edit32's transparent `Error` type.
 /// Abstracts over system and application errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {

@@ -1,0 +1,7 @@
+{
+  "name": "edit",
+  "version": 1,
+  "enabled": true,
+  "items": ["a", "b", "c"],
+  "nullValue": null
+}

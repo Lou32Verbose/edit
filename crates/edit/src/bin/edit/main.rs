@@ -8,6 +8,9 @@ mod draw_editor;
 mod draw_filepicker;
 mod draw_menubar;
 mod draw_statusbar;
+mod config;
+mod commands;
+mod find_in_files;
 mod localization;
 mod state;
 
@@ -24,7 +27,7 @@ use draw_menubar::*;
 use draw_statusbar::*;
 use edit::framebuffer::{self, IndexedColor};
 use edit::helpers::{CoordType, KIBI, MEBI, MetricFormatter, Rect, Size};
-use edit::input::{self, kbmod, vk};
+use edit::input::{self, vk};
 use edit::oklab::StraightRgba;
 use edit::tui::*;
 use edit::vt::{self, Token};
@@ -84,25 +87,12 @@ fn run() -> apperr::Result<()> {
 
     let _restore = setup_terminal(&mut tui, &mut state, &mut vt_parser);
 
-    state.menubar_color_bg = tui.indexed(IndexedColor::Background).oklab_blend(tui.indexed_alpha(
-        IndexedColor::BrightBlue,
-        1,
-        2,
-    ));
-    state.menubar_color_fg = tui.contrasted(state.menubar_color_bg);
-    let floater_bg = tui
-        .indexed_alpha(IndexedColor::Background, 2, 3)
-        .oklab_blend(tui.indexed_alpha(IndexedColor::Foreground, 1, 3));
-    let floater_fg = tui.contrasted(floater_bg);
+    apply_theme(&mut tui, &mut state);
     tui.setup_modifier_translations(ModifierTranslations {
         ctrl: loc(LocId::Ctrl),
         alt: loc(LocId::Alt),
         shift: loc(LocId::Shift),
     });
-    tui.set_floater_default_bg(floater_bg);
-    tui.set_floater_default_fg(floater_fg);
-    tui.set_modal_default_bg(floater_bg);
-    tui.set_modal_default_fg(floater_fg);
 
     sys::inject_window_size_into_stdin();
 
@@ -110,6 +100,9 @@ fn run() -> apperr::Result<()> {
     let mut last_latency_width = 0;
 
     loop {
+        if state.needs_theme_refresh {
+            apply_theme(&mut tui, &mut state);
+        }
         #[cfg(feature = "debug-latency")]
         let time_beg;
         #[cfg(feature = "debug-latency")]
@@ -135,13 +128,23 @@ fn run() -> apperr::Result<()> {
             while {
                 let input = input_iter.next();
                 let more = input.is_some();
-                let mut ctx = tui.create_context(input);
-
-                draw(&mut ctx, &mut state);
-
-                #[cfg(feature = "debug-latency")]
+                let mut apply_theme_now = false;
                 {
-                    passes += 1;
+                    let mut ctx = tui.create_context(input);
+
+                    draw(&mut ctx, &mut state);
+                    if state.needs_theme_refresh {
+                        ctx.needs_rerender();
+                        apply_theme_now = true;
+                    }
+
+                    #[cfg(feature = "debug-latency")]
+                    {
+                        passes += 1;
+                    }
+                }
+                if apply_theme_now {
+                    apply_theme(&mut tui, &mut state);
                 }
 
                 more
@@ -151,13 +154,23 @@ fn run() -> apperr::Result<()> {
         // Continue rendering until the layout has settled.
         // This can take >1 frame, if the input focus is tossed between different controls.
         while tui.needs_settling() {
-            let mut ctx = tui.create_context(None);
-
-            draw(&mut ctx, &mut state);
-
-            #[cfg(feature = "debug-latency")]
+            let mut apply_theme_now = false;
             {
-                passes += 1;
+                let mut ctx = tui.create_context(None);
+
+                draw(&mut ctx, &mut state);
+                if state.needs_theme_refresh {
+                    ctx.needs_rerender();
+                    apply_theme_now = true;
+                }
+
+                #[cfg(feature = "debug-latency")]
+                {
+                    passes += 1;
+                }
+            }
+            if apply_theme_now {
+                apply_theme(&mut tui, &mut state);
             }
         }
 
@@ -262,17 +275,26 @@ fn handle_args(state: &mut State) -> apperr::Result<bool> {
     }
 
     for p in &paths {
-        state.documents.add_file_path(p)?;
+        match state.documents.add_file_path(p, &state.settings)? {
+            documents::OpenOutcome::Opened => {
+                state::push_recent_file(state, p.to_path_buf());
+            }
+            documents::OpenOutcome::BinaryDetected { path, goto } => {
+                state.wants_binary_prompt = true;
+                state.binary_prompt_path = Some(path);
+                state.binary_prompt_goto = goto;
+            }
+        }
     }
 
     if let Some(mut file) = sys::open_stdin_if_redirected() {
-        let doc = state.documents.add_untitled()?;
+        let doc = state.documents.add_untitled(&state.settings)?;
         let mut tb = doc.buffer.borrow_mut();
         tb.read_file(&mut file, None)?;
         tb.mark_as_dirty();
     } else if paths.is_empty() {
         // No files were passed, and stdin is not redirected.
-        state.documents.add_untitled()?;
+        state.documents.add_untitled(&state.settings)?;
     }
 
     if dir.is_none()
@@ -287,7 +309,7 @@ fn handle_args(state: &mut State) -> apperr::Result<bool> {
 
 fn print_help() {
     sys::write_stdout(concat!(
-        "Usage: edit [OPTIONS] [FILE[:LINE[:COLUMN]]]\n",
+        "Usage: edit32 [OPTIONS] [FILE[:LINE[:COLUMN]]]\n",
         "Options:\n",
         "    -h, --help       Print this help message\n",
         "    -v, --version    Print the version number\n",
@@ -298,7 +320,7 @@ fn print_help() {
 }
 
 fn print_version() {
-    sys::write_stdout(concat!("edit version ", env!("CARGO_PKG_VERSION"), "\n"));
+    sys::write_stdout(concat!("edit32 version ", env!("CARGO_PKG_VERSION"), "\n"));
 }
 
 fn draw(ctx: &mut Context, state: &mut State) {
@@ -327,8 +349,35 @@ fn draw(ctx: &mut Context, state: &mut State) {
     if state.wants_go_to_file {
         draw_go_to_file(ctx, state);
     }
+    if state.wants_find_in_files {
+        draw_find_in_files(ctx, state);
+    }
+    if state.wants_command_palette {
+        draw_command_palette(ctx, state);
+    }
+    if state.wants_quick_switcher {
+        draw_quick_switcher(ctx, state);
+    }
+    if state.wants_theme_picker {
+        draw_theme_picker(ctx, state);
+    }
+    if state.wants_keybinding_editor {
+        draw_keybinding_editor(ctx, state);
+    }
     if state.wants_about {
         draw_dialog_about(ctx, state);
+    }
+    if state.wants_context_help {
+        draw_context_help(ctx, state);
+    }
+    if state.wants_quick_start {
+        draw_quick_start(ctx, state);
+    }
+    if state.wants_binary_prompt {
+        draw_binary_prompt(ctx, state);
+    }
+    if state.wants_replace_preview {
+        draw_replace_preview(ctx, state);
     }
     if ctx.clipboard_ref().wants_host_sync() {
         draw_handle_clipboard_change(ctx, state);
@@ -340,30 +389,38 @@ fn draw(ctx: &mut Context, state: &mut State) {
     if let Some(key) = ctx.keyboard_input() {
         // Shortcuts that are not handled as part of the textarea, etc.
 
-        if key == kbmod::CTRL | vk::N {
-            draw_add_untitled_document(ctx, state);
-        } else if key == kbmod::CTRL | vk::O {
-            state.wants_file_picker = StateFilePicker::Open;
-        } else if key == kbmod::CTRL | vk::S {
-            state.wants_save = true;
-        } else if key == kbmod::CTRL_SHIFT | vk::S {
-            state.wants_file_picker = StateFilePicker::SaveAs;
-        } else if key == kbmod::CTRL | vk::W {
-            state.wants_close = true;
-        } else if key == kbmod::CTRL | vk::P {
-            state.wants_go_to_file = true;
-        } else if key == kbmod::CTRL | vk::Q {
-            state.wants_exit = true;
-        } else if key == kbmod::CTRL | vk::G {
-            state.wants_goto = true;
-        } else if key == kbmod::CTRL | vk::F && state.wants_search.kind != StateSearchKind::Disabled
+        if key == state.keybindings.shortcut(commands::CommandId::FileNew) {
+            commands::run_command(ctx, state, commands::CommandId::FileNew);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FileOpen) {
+            commands::run_command(ctx, state, commands::CommandId::FileOpen);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FileSave) {
+            commands::run_command(ctx, state, commands::CommandId::FileSave);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FileSaveAs) {
+            commands::run_command(ctx, state, commands::CommandId::FileSaveAs);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FileClose) {
+            commands::run_command(ctx, state, commands::CommandId::FileClose);
+        } else if key == state.keybindings.shortcut(commands::CommandId::ViewGoToFile) {
+            commands::run_command(ctx, state, commands::CommandId::ViewGoToFile);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FileExit) {
+            commands::run_command(ctx, state, commands::CommandId::FileExit);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FileGoto) {
+            commands::run_command(ctx, state, commands::CommandId::FileGoto);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditFind)
+            && state.wants_search.kind != StateSearchKind::Disabled
         {
-            state.wants_search.kind = StateSearchKind::Search;
-            state.wants_search.focus = true;
-        } else if key == kbmod::CTRL | vk::R && state.wants_search.kind != StateSearchKind::Disabled
+            commands::run_command(ctx, state, commands::CommandId::EditFind);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditReplace)
+            && state.wants_search.kind != StateSearchKind::Disabled
         {
-            state.wants_search.kind = StateSearchKind::Replace;
-            state.wants_search.focus = true;
+            commands::run_command(ctx, state, commands::CommandId::EditReplace);
+        } else if key == state.keybindings.shortcut(commands::CommandId::FindInFiles) {
+            commands::run_command(ctx, state, commands::CommandId::FindInFiles);
+        } else if key == state.keybindings.shortcut(commands::CommandId::CommandPalette) {
+            commands::run_command(ctx, state, commands::CommandId::CommandPalette);
+        } else if key == state.keybindings.shortcut(commands::CommandId::SettingsOpenConfig) {
+            commands::run_command(ctx, state, commands::CommandId::SettingsOpenConfig);
+        } else if key == state.keybindings.shortcut(commands::CommandId::SettingsReload) {
+            commands::run_command(ctx, state, commands::CommandId::SettingsReload);
         } else if key == vk::F3 {
             search_execute(ctx, state, SearchAction::Search);
         } else {
@@ -410,7 +467,7 @@ fn write_terminal_title(output: &mut ArenaString, state: &mut State) {
         output.push_str(&sanitize_control_chars(filename));
         output.push_str(" - ");
     }
-    output.push_str("edit\x1b\\");
+    output.push_str("Edit32\x1b\\");
 
     state.osc_title_file_status.filename = filename.to_string();
     state.osc_title_file_status.dirty = dirty;
@@ -418,6 +475,268 @@ fn write_terminal_title(output: &mut ArenaString, state: &mut State) {
 
 const LARGE_CLIPBOARD_THRESHOLD: usize = 128 * KIBI;
 
+fn apply_theme(tui: &mut Tui, state: &mut State) {
+    if state.settings.theme == config::ThemeId::Terminal {
+        tui.setup_indexed_colors(state.terminal_palette);
+    } else if state.settings.theme == config::ThemeId::Custom {
+        if let Some(palette) = state.settings.custom_theme {
+            tui.setup_indexed_colors(palette);
+        } else {
+            tui.setup_indexed_colors(state.terminal_palette);
+        }
+    } else if let Some(palette) = theme_palette(state.settings.theme) {
+        tui.setup_indexed_colors(palette);
+    }
+
+    if state.settings.high_contrast {
+        state.menubar_color_bg = tui.indexed(IndexedColor::Black);
+        state.menubar_color_fg = tui.indexed(IndexedColor::BrightWhite);
+        let floater_bg = tui.indexed(IndexedColor::Black);
+        let floater_fg = tui.indexed(IndexedColor::BrightWhite);
+        tui.set_floater_default_bg(floater_bg);
+        tui.set_floater_default_fg(floater_fg);
+        tui.set_modal_default_bg(floater_bg);
+        tui.set_modal_default_fg(floater_fg);
+
+        state.editor_color_bg = tui.indexed(IndexedColor::Black);
+        state.editor_color_fg = tui.indexed(IndexedColor::BrightWhite);
+    } else {
+        state.menubar_color_bg =
+            tui.indexed(IndexedColor::Background).oklab_blend(tui.indexed_alpha(
+                IndexedColor::BrightBlue,
+                1,
+                2,
+            ));
+        state.menubar_color_fg = tui.contrasted(state.menubar_color_bg);
+        let floater_bg = tui
+            .indexed_alpha(IndexedColor::Background, 2, 3)
+            .oklab_blend(tui.indexed_alpha(IndexedColor::Foreground, 1, 3));
+        let floater_fg = tui.contrasted(floater_bg);
+        tui.set_floater_default_bg(floater_bg);
+        tui.set_floater_default_fg(floater_fg);
+        tui.set_modal_default_bg(floater_bg);
+        tui.set_modal_default_fg(floater_fg);
+
+        if state.settings.theme == config::ThemeId::Terminal {
+            state.editor_color_bg = tui.indexed(IndexedColor::White);
+            state.editor_color_fg = tui.indexed(IndexedColor::Black);
+        } else {
+            state.editor_color_bg = tui.indexed(IndexedColor::Background);
+            state.editor_color_fg = tui.indexed(IndexedColor::Foreground);
+        }
+    }
+    state.needs_theme_refresh = false;
+}
+
+fn theme_palette(
+    theme: config::ThemeId,
+) -> Option<[StraightRgba; framebuffer::INDEXED_COLORS_COUNT]> {
+    use config::ThemeId;
+
+    match theme {
+        ThemeId::Terminal | ThemeId::Custom => None,
+        ThemeId::Nord => Some([
+            StraightRgba::from_be(0x3b4252ff), // Black
+            StraightRgba::from_be(0xbf616aff), // Red
+            StraightRgba::from_be(0xa3be8cff), // Green
+            StraightRgba::from_be(0xebcb8bff), // Yellow
+            StraightRgba::from_be(0x81a1c1ff), // Blue
+            StraightRgba::from_be(0xb48eadff), // Magenta
+            StraightRgba::from_be(0x88c0d0ff), // Cyan
+            StraightRgba::from_be(0xe5e9f0ff), // White
+            StraightRgba::from_be(0x4c566aff), // BrightBlack
+            StraightRgba::from_be(0xd57780ff), // BrightRed
+            StraightRgba::from_be(0xb7d39aff), // BrightGreen
+            StraightRgba::from_be(0xf0d399ff), // BrightYellow
+            StraightRgba::from_be(0x8fafd1ff), // BrightBlue
+            StraightRgba::from_be(0xc49bbdff), // BrightMagenta
+            StraightRgba::from_be(0x97d0e0ff), // BrightCyan
+            StraightRgba::from_be(0xeceff4ff), // BrightWhite
+            StraightRgba::from_be(0x2e3440ff), // Background
+            StraightRgba::from_be(0xd8dee9ff), // Foreground
+        ]),
+        ThemeId::OneDark => Some([
+            StraightRgba::from_be(0x282c34ff), // Black
+            StraightRgba::from_be(0xe06c75ff), // Red
+            StraightRgba::from_be(0x98c379ff), // Green
+            StraightRgba::from_be(0xe5c07bff), // Yellow
+            StraightRgba::from_be(0x61afefff), // Blue
+            StraightRgba::from_be(0xc678ddff), // Magenta
+            StraightRgba::from_be(0x56b6c2ff), // Cyan
+            StraightRgba::from_be(0xabb2bfff), // White
+            StraightRgba::from_be(0x5c6370ff), // BrightBlack
+            StraightRgba::from_be(0xff7b86ff), // BrightRed
+            StraightRgba::from_be(0xb6f28aff), // BrightGreen
+            StraightRgba::from_be(0xffd68aff), // BrightYellow
+            StraightRgba::from_be(0x78bdfbff), // BrightBlue
+            StraightRgba::from_be(0xd7a1f0ff), // BrightMagenta
+            StraightRgba::from_be(0x70d9e3ff), // BrightCyan
+            StraightRgba::from_be(0xe6ebf2ff), // BrightWhite
+            StraightRgba::from_be(0x282c34ff), // Background
+            StraightRgba::from_be(0xabb2bfff), // Foreground
+        ]),
+        ThemeId::Gruvbox => Some([
+            StraightRgba::from_be(0x282828ff), // Black
+            StraightRgba::from_be(0xcc241dff), // Red
+            StraightRgba::from_be(0x98971aff), // Green
+            StraightRgba::from_be(0xd79921ff), // Yellow
+            StraightRgba::from_be(0x458588ff), // Blue
+            StraightRgba::from_be(0xb16286ff), // Magenta
+            StraightRgba::from_be(0x689d6aff), // Cyan
+            StraightRgba::from_be(0xa89984ff), // White
+            StraightRgba::from_be(0x928374ff), // BrightBlack
+            StraightRgba::from_be(0xfb4934ff), // BrightRed
+            StraightRgba::from_be(0xb8bb26ff), // BrightGreen
+            StraightRgba::from_be(0xfabd2fff), // BrightYellow
+            StraightRgba::from_be(0x83a598ff), // BrightBlue
+            StraightRgba::from_be(0xd3869bff), // BrightMagenta
+            StraightRgba::from_be(0x8ec07cff), // BrightCyan
+            StraightRgba::from_be(0xebdbb2ff), // BrightWhite
+            StraightRgba::from_be(0x282828ff), // Background
+            StraightRgba::from_be(0xebdbb2ff), // Foreground
+        ]),
+        ThemeId::Monokai => Some([
+            StraightRgba::from_be(0x272822ff), // Black
+            StraightRgba::from_be(0xf92672ff), // Red
+            StraightRgba::from_be(0xa6e22eff), // Green
+            StraightRgba::from_be(0xe6db74ff), // Yellow
+            StraightRgba::from_be(0x66d9efff), // Blue
+            StraightRgba::from_be(0xae81ffff), // Magenta
+            StraightRgba::from_be(0xa1efe4ff), // Cyan
+            StraightRgba::from_be(0xf8f8f2ff), // White
+            StraightRgba::from_be(0x75715eff), // BrightBlack
+            StraightRgba::from_be(0xff6188ff), // BrightRed
+            StraightRgba::from_be(0xb9f27cff), // BrightGreen
+            StraightRgba::from_be(0xfff4a3ff), // BrightYellow
+            StraightRgba::from_be(0x78e6ffff), // BrightBlue
+            StraightRgba::from_be(0xc7a4ffff), // BrightMagenta
+            StraightRgba::from_be(0x8fe3d5ff), // BrightCyan
+            StraightRgba::from_be(0xffffffff), // BrightWhite
+            StraightRgba::from_be(0x272822ff), // Background
+            StraightRgba::from_be(0xf8f8f2ff), // Foreground
+        ]),
+        ThemeId::SolarizedDark => Some([
+            StraightRgba::from_be(0x073642ff), // Black
+            StraightRgba::from_be(0xdc322fff), // Red
+            StraightRgba::from_be(0x859900ff), // Green
+            StraightRgba::from_be(0xb58900ff), // Yellow
+            StraightRgba::from_be(0x268bd2ff), // Blue
+            StraightRgba::from_be(0xd33682ff), // Magenta
+            StraightRgba::from_be(0x2aa198ff), // Cyan
+            StraightRgba::from_be(0xeee8d5ff), // White
+            StraightRgba::from_be(0x002b36ff), // BrightBlack
+            StraightRgba::from_be(0xcb4b16ff), // BrightRed
+            StraightRgba::from_be(0x586e75ff), // BrightGreen
+            StraightRgba::from_be(0x657b83ff), // BrightYellow
+            StraightRgba::from_be(0x839496ff), // BrightBlue
+            StraightRgba::from_be(0x6c71c4ff), // BrightMagenta
+            StraightRgba::from_be(0x93a1a1ff), // BrightCyan
+            StraightRgba::from_be(0xfdf6e3ff), // BrightWhite
+            StraightRgba::from_be(0x002b36ff), // Background
+            StraightRgba::from_be(0x839496ff), // Foreground
+        ]),
+        ThemeId::SolarizedLight => Some([
+            StraightRgba::from_be(0x073642ff), // Black
+            StraightRgba::from_be(0xdc322fff), // Red
+            StraightRgba::from_be(0x859900ff), // Green
+            StraightRgba::from_be(0xb58900ff), // Yellow
+            StraightRgba::from_be(0x268bd2ff), // Blue
+            StraightRgba::from_be(0xd33682ff), // Magenta
+            StraightRgba::from_be(0x2aa198ff), // Cyan
+            StraightRgba::from_be(0xeee8d5ff), // White
+            StraightRgba::from_be(0x002b36ff), // BrightBlack
+            StraightRgba::from_be(0xcb4b16ff), // BrightRed
+            StraightRgba::from_be(0x586e75ff), // BrightGreen
+            StraightRgba::from_be(0x657b83ff), // BrightYellow
+            StraightRgba::from_be(0x839496ff), // BrightBlue
+            StraightRgba::from_be(0x6c71c4ff), // BrightMagenta
+            StraightRgba::from_be(0x93a1a1ff), // BrightCyan
+            StraightRgba::from_be(0xfdf6e3ff), // BrightWhite
+            StraightRgba::from_be(0xfdf6e3ff), // Background
+            StraightRgba::from_be(0x657b83ff), // Foreground
+        ]),
+        ThemeId::Dracula => Some([
+            StraightRgba::from_be(0x21222cff), // Black
+            StraightRgba::from_be(0xff5555ff), // Red
+            StraightRgba::from_be(0x50fa7bff), // Green
+            StraightRgba::from_be(0xf1fa8cff), // Yellow
+            StraightRgba::from_be(0xbd93f9ff), // Blue
+            StraightRgba::from_be(0xff79c6ff), // Magenta
+            StraightRgba::from_be(0x8be9fdff), // Cyan
+            StraightRgba::from_be(0xf8f8f2ff), // White
+            StraightRgba::from_be(0x6272a4ff), // BrightBlack
+            StraightRgba::from_be(0xff6e6eff), // BrightRed
+            StraightRgba::from_be(0x69ff94ff), // BrightGreen
+            StraightRgba::from_be(0xffffa5ff), // BrightYellow
+            StraightRgba::from_be(0xd6acffff), // BrightBlue
+            StraightRgba::from_be(0xff92dfff), // BrightMagenta
+            StraightRgba::from_be(0xa4ffffff), // BrightCyan
+            StraightRgba::from_be(0xffffffff), // BrightWhite
+            StraightRgba::from_be(0x282a36ff), // Background
+            StraightRgba::from_be(0xf8f8f2ff), // Foreground
+        ]),
+        ThemeId::TokyoNight => Some([
+            StraightRgba::from_be(0x15161eff), // Black
+            StraightRgba::from_be(0xf7768eff), // Red
+            StraightRgba::from_be(0x9ece6aff), // Green
+            StraightRgba::from_be(0xe0af68ff), // Yellow
+            StraightRgba::from_be(0x7aa2f7ff), // Blue
+            StraightRgba::from_be(0xbb9af7ff), // Magenta
+            StraightRgba::from_be(0x7dcfffff), // Cyan
+            StraightRgba::from_be(0xa9b1d6ff), // White
+            StraightRgba::from_be(0x414868ff), // BrightBlack
+            StraightRgba::from_be(0xff7a93ff), // BrightRed
+            StraightRgba::from_be(0xb9f27cff), // BrightGreen
+            StraightRgba::from_be(0xff9e64ff), // BrightYellow
+            StraightRgba::from_be(0x7da6ffff), // BrightBlue
+            StraightRgba::from_be(0xc8a2ffff), // BrightMagenta
+            StraightRgba::from_be(0x9aa5ceff), // BrightCyan
+            StraightRgba::from_be(0xc0caf5ff), // BrightWhite
+            StraightRgba::from_be(0x1a1b26ff), // Background
+            StraightRgba::from_be(0xc0caf5ff), // Foreground
+        ]),
+        ThemeId::Midnight => Some([
+            StraightRgba::from_be(0x000000ff), // Black
+            StraightRgba::from_be(0xff2b2bff), // Red
+            StraightRgba::from_be(0x22ff88ff), // Green
+            StraightRgba::from_be(0xffd400ff), // Yellow
+            StraightRgba::from_be(0x2f8bffff), // Blue
+            StraightRgba::from_be(0xc08bffff), // Magenta
+            StraightRgba::from_be(0x00f0ffff), // Cyan
+            StraightRgba::from_be(0xf0f2f6ff), // White
+            StraightRgba::from_be(0x20232bff), // BrightBlack
+            StraightRgba::from_be(0xff5b5bff), // BrightRed
+            StraightRgba::from_be(0x4dffa3ff), // BrightGreen
+            StraightRgba::from_be(0xffe866ff), // BrightYellow
+            StraightRgba::from_be(0x62b1ffff), // BrightBlue
+            StraightRgba::from_be(0xd1adffff), // BrightMagenta
+            StraightRgba::from_be(0x5af6ffff), // BrightCyan
+            StraightRgba::from_be(0xffffffff), // BrightWhite
+            StraightRgba::from_be(0x020203ff), // Background
+            StraightRgba::from_be(0xf8f9fbff), // Foreground
+        ]),
+        ThemeId::Paperwhite => Some([
+            StraightRgba::from_be(0x22201bff), // Black
+            StraightRgba::from_be(0x9a1f2bff), // Red
+            StraightRgba::from_be(0x1a7b3bff), // Green
+            StraightRgba::from_be(0xa86a10ff), // Yellow
+            StraightRgba::from_be(0x1c5fa8ff), // Blue
+            StraightRgba::from_be(0x7a2a9bff), // Magenta
+            StraightRgba::from_be(0x1e7c8cff), // Cyan
+            StraightRgba::from_be(0xeae6dcff), // White
+            StraightRgba::from_be(0x5a5a5aff), // BrightBlack
+            StraightRgba::from_be(0xc23b4bff), // BrightRed
+            StraightRgba::from_be(0x3f9a5aff), // BrightGreen
+            StraightRgba::from_be(0xd59a3aff), // BrightYellow
+            StraightRgba::from_be(0x3a7fc4ff), // BrightBlue
+            StraightRgba::from_be(0xa066d6ff), // BrightMagenta
+            StraightRgba::from_be(0x3bb0bbff), // BrightCyan
+            StraightRgba::from_be(0xfaf8f2ff), // BrightWhite
+            StraightRgba::from_be(0xf3f1eaff), // Background
+            StraightRgba::from_be(0x22201bff), // Foreground
+        ]),
+    }
+}
 fn draw_handle_clipboard_change(ctx: &mut Context, state: &mut State) {
     let data_len = ctx.clipboard_ref().read().len();
 
@@ -469,6 +788,7 @@ fn draw_handle_clipboard_change(ctx: &mut Context, state: &mut State) {
         {
             ctx.table_next_row();
             ctx.inherit_focus();
+            ctx.focus_on_first_present();
 
             if over_limit {
                 if ctx.button("ok", loc(LocId::Ok), ButtonStyle::default()) {
@@ -655,8 +975,178 @@ fn setup_terminal(tui: &mut Tui, state: &mut State, vt_parser: &mut vt::Parser) 
     if color_responses == indexed_colors.len() {
         tui.setup_indexed_colors(indexed_colors);
     }
+    state.terminal_palette = indexed_colors;
 
     RestoreModes
+}
+
+fn draw_binary_prompt(ctx: &mut Context, state: &mut State) {
+    let mut open_hex = false;
+    let mut done = false;
+
+    ctx.modal_begin("binary", "Binary File Detected");
+    {
+        ctx.block_begin("content");
+        ctx.attr_padding(Rect::three(1, 2, 1));
+        ctx.label("line1", "This file appears to be binary.");
+        ctx.attr_position(Position::Center);
+        ctx.label("line2", "Open it in hex view?");
+        ctx.attr_position(Position::Center);
+        ctx.block_end();
+
+        ctx.table_begin("choices");
+        ctx.inherit_focus();
+        ctx.attr_padding(Rect::three(0, 2, 1));
+        ctx.attr_position(Position::Center);
+        ctx.table_set_cell_gap(Size { width: 2, height: 0 });
+        {
+            ctx.table_next_row();
+            ctx.inherit_focus();
+            ctx.focus_on_first_present();
+
+            if ctx.button("hex", "Open Hex", ButtonStyle::default()) {
+                open_hex = true;
+                done = true;
+            }
+            ctx.inherit_focus();
+            if ctx.button("cancel", "Cancel", ButtonStyle::default()) {
+                done = true;
+            }
+        }
+        ctx.table_end();
+    }
+    if ctx.modal_end() {
+        done = true;
+    }
+
+    if done {
+        if open_hex {
+            if let Some(path) = state.binary_prompt_path.take() {
+                if let Err(err) = state.documents.add_file_path_hex(&path, &state.settings) {
+                    error_log_add(ctx, state, err);
+                } else {
+                    state::push_recent_file(state, path);
+                }
+            }
+        } else {
+            state.binary_prompt_path = None;
+        }
+        state.binary_prompt_goto = None;
+        state.wants_binary_prompt = false;
+        ctx.needs_rerender();
+    }
+}
+
+fn draw_context_help(ctx: &mut Context, state: &mut State) {
+    let mut done = false;
+
+    ctx.modal_begin("context-help", "Context Help");
+    {
+        ctx.block_begin("content");
+        ctx.attr_padding(Rect::three(1, 2, 1));
+        for (idx, line) in context_help_lines(state).iter().enumerate() {
+            ctx.next_block_id_mixin(idx as u64);
+            ctx.label("line", line);
+            ctx.attr_overflow(Overflow::TruncateTail);
+        }
+        ctx.block_end();
+
+        if ctx.button("ok", loc(LocId::Ok), ButtonStyle::default()) {
+            done = true;
+        }
+        ctx.attr_position(Position::Center);
+        ctx.focus_on_first_present();
+    }
+    if ctx.modal_end() {
+        done = true;
+    }
+
+    if done {
+        state.wants_context_help = false;
+        ctx.needs_rerender();
+    }
+}
+
+fn context_help_lines(state: &State) -> &'static [&'static str] {
+    if state.wants_file_picker != StateFilePicker::None {
+        return &[
+            "File picker:",
+            "- Enter to open, Esc to cancel",
+            "- Type to filter or use arrows to navigate",
+            "- Alt+Up to go to parent folder",
+        ];
+    }
+    if state.wants_search.kind != StateSearchKind::Hidden {
+        return &[
+            "Search:",
+            "- Enter to search, Esc to close",
+            "- Ctrl+R to switch to Replace",
+            "- F3 to find next",
+        ];
+    }
+    if state.wants_quick_switcher {
+        return &[
+            "Quick Switcher:",
+            "- Type to filter, Enter to open",
+            "- Use folder: prefix for recent folders",
+        ];
+    }
+    if state.wants_keybinding_editor {
+        return &[
+            "Keybindings:",
+            "- Enter to rebind selected command",
+            "- Press Esc to cancel capture",
+        ];
+    }
+    &[
+        "General:",
+        "- F1: Command Palette",
+        "- Ctrl+O: Open file",
+        "- Ctrl+Shift+O: Open folder",
+    ]
+}
+
+fn draw_quick_start(ctx: &mut Context, state: &mut State) {
+    let mut done = false;
+
+    ctx.modal_begin("quick-start", "Quick Start");
+    {
+        ctx.block_begin("content");
+        ctx.attr_padding(Rect::three(1, 2, 1));
+        for (idx, line) in quick_start_lines().iter().enumerate() {
+            ctx.next_block_id_mixin(idx as u64);
+            ctx.label("line", line);
+            ctx.attr_overflow(Overflow::TruncateTail);
+        }
+        ctx.block_end();
+
+        if ctx.button("ok", loc(LocId::Ok), ButtonStyle::default()) {
+            done = true;
+        }
+        ctx.attr_position(Position::Center);
+        ctx.focus_on_first_present();
+    }
+    if ctx.modal_end() {
+        done = true;
+    }
+
+    if done {
+        state.wants_quick_start = false;
+        ctx.needs_rerender();
+    }
+}
+
+fn quick_start_lines() -> &'static [&'static str] {
+    &[
+        "Quick Start:",
+        "- Ctrl+O: Open file",
+        "- Ctrl+Shift+O: Open folder",
+        "- Ctrl+S: Save",
+        "- Ctrl+F: Find, Ctrl+R: Replace",
+        "- F1: Command Palette",
+        "- Ctrl+E: Quick Switcher",
+        "- View > Theme: Theme Picker",
+    ]
 }
 
 /// Strips all C0 control characters from the string and replaces them with "_".

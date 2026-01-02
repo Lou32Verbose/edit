@@ -6,10 +6,11 @@
 //! Read the `windows` module for reference.
 //! TODO: This reminds me that the sys API should probably be a trait.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
-use std::fs::File;
+use std::ffi::{CStr, OsStr, OsString, c_char, c_int, c_void};
+use std::fs::{self, File, OpenOptions};
 use std::mem::{self, ManuallyDrop, MaybeUninit};
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::ptr::{self, NonNull, null_mut};
 use std::{thread, time};
@@ -364,6 +365,59 @@ pub fn file_id(file: Option<&File>, path: &Path) -> apperr::Result<FileId> {
         let stat = stat.assume_init();
         Ok(FileId { st_dev: stat.st_dev, st_ino: stat.st_ino })
     }
+}
+
+pub fn atomic_write<F>(path: &Path, write: F) -> apperr::Result<()>
+where
+    F: FnOnce(&mut File) -> apperr::Result<()>,
+{
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_else(|| OsStr::new("edit32"));
+    let perms = fs::metadata(path).ok().map(|meta| meta.permissions().mode());
+
+    let mut attempt = 0u32;
+    let (mut temp_path, mut temp_file) = loop {
+        attempt = attempt.wrapping_add(1);
+        let mut name = OsString::from(file_name);
+        name.push(".tmp-");
+        name.push(format!("{}-{}", std::process::id(), attempt));
+        let candidate = parent.join(name);
+
+        match OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(file) => break (candidate, file),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    };
+
+    let write_result = write(&mut temp_file);
+    let sync_result = temp_file.sync_all();
+    drop(temp_file);
+
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    if let Err(err) = sync_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+
+    if let Some(mode) = perms {
+        let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(mode));
+    }
+
+    let rename_result = fs::rename(&temp_path, path);
+    if let Err(err) = rename_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+
+    if let Ok(dir) = File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
+    Ok(())
 }
 
 unsafe fn load_library(name: *const c_char) -> apperr::Result<NonNull<c_void>> {

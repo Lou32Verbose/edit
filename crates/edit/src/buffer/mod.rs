@@ -76,6 +76,74 @@ struct TextBufferSelection {
     end: Point,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    PlainText,
+    Rust,
+    Toml,
+    Json,
+    Markdown,
+    Python,
+    JavaScript,
+    TypeScript,
+    Html,
+    Css,
+    Yaml,
+    Shell,
+    C,
+    Cpp,
+    CSharp,
+    Go,
+    Java,
+    Kotlin,
+    Ruby,
+    Php,
+    Sql,
+    Xml,
+    Ini,
+    Lua,
+    Makefile,
+    PowerShell,
+    R,
+    Swift,
+    ObjectiveC,
+    Dart,
+    Scala,
+    Haskell,
+    Elixir,
+    Erlang,
+    Clojure,
+    FSharp,
+    VbNet,
+    Perl,
+    Groovy,
+    Terraform,
+    Nix,
+    Assembly,
+    Latex,
+    Mdx,
+    Graphql,
+}
+
+#[derive(Clone, Copy)]
+enum HighlightKind {
+    Comment,
+    String,
+    Number,
+    Keyword,
+}
+
+struct HighlightSpan {
+    start: usize,
+    end: usize,
+    kind: HighlightKind,
+}
+
+struct SearchHighlight {
+    needle: String,
+    options: SearchOptions,
+}
+
 /// In order to group actions into a single undo step,
 /// we need to know the type of action that was performed.
 /// This stores the action type.
@@ -240,6 +308,8 @@ pub struct TextBuffer {
     line_highlight_enabled: bool,
     ruler: CoordType,
     encoding: &'static str,
+    language: Language,
+    search_highlight: Option<SearchHighlight>,
     newlines_are_crlf: bool,
     insert_final_newline: bool,
     overtype: bool,
@@ -288,6 +358,8 @@ impl TextBuffer {
             line_highlight_enabled: false,
             ruler: 0,
             encoding: "UTF-8",
+            language: Language::PlainText,
+            search_highlight: None,
             newlines_are_crlf: cfg!(windows), // Windows users want CRLF
             insert_final_newline: false,
             overtype: false,
@@ -330,13 +402,47 @@ impl TextBuffer {
         self.last_save_generation = self.buffer.generation().wrapping_sub(1);
     }
 
-    fn mark_as_clean(&mut self) {
+    pub fn mark_as_clean(&mut self) {
         self.last_save_generation = self.buffer.generation();
     }
 
     /// The encoding used during reading/writing. "UTF-8" is the default.
     pub fn encoding(&self) -> &'static str {
         self.encoding
+    }
+
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        self.language = language;
+    }
+
+    pub fn set_search_highlight(&mut self, needle: &str, options: SearchOptions) {
+        if needle.trim_ascii().is_empty() {
+            self.search_highlight = None;
+            return;
+        }
+
+        if let Some(current) = &mut self.search_highlight {
+            if current.needle == needle && current.options == options {
+                return;
+            }
+            current.needle.clear();
+            current.needle.push_str(needle);
+            current.options = options;
+            return;
+        }
+
+        self.search_highlight = Some(SearchHighlight {
+            needle: needle.to_string(),
+            options,
+        });
+    }
+
+    pub fn clear_search_highlight(&mut self) {
+        self.search_highlight = None;
     }
 
     /// Set the encoding used during reading/writing.
@@ -369,7 +475,7 @@ impl TextBuffer {
             self.cursor_for_rendering.map_or(cursor_offset, |c| c.offset);
 
         #[cfg(debug_assertions)]
-        let mut adjusted_newlines = 0;
+        let mut cursor_newlines = 0;
 
         'outer: loop {
             // Seek to the offset of the next line start.
@@ -386,6 +492,13 @@ impl TextBuffer {
                 }
             }
 
+            #[cfg(debug_assertions)]
+            {
+                if off <= cursor_offset {
+                    cursor_newlines += 1;
+                }
+            }
+
             // Get the preceding newline.
             let chunk = self.read_backward(off);
             let chunk_newline_len = if chunk.ends_with(b"\r\n") { 2 } else { 1 };
@@ -397,10 +510,6 @@ impl TextBuffer {
                 let delta = newline.len() as isize - chunk_newline_len as isize;
                 if off <= cursor_offset {
                     cursor_offset = cursor_offset.saturating_add_signed(delta);
-                    #[cfg(debug_assertions)]
-                    {
-                        adjusted_newlines += 1;
-                    }
                 }
                 if off <= cursor_for_rendering_offset {
                     cursor_for_rendering_offset =
@@ -416,7 +525,7 @@ impl TextBuffer {
 
         // If this fails, the cursor offset calculation above is wrong.
         #[cfg(debug_assertions)]
-        debug_assert_eq!(adjusted_newlines, self.cursor.logical_pos.y);
+        debug_assert_eq!(cursor_newlines, self.cursor.logical_pos.y);
 
         self.cursor.offset = cursor_offset;
         if let Some(cursor) = &mut self.cursor_for_rendering {
@@ -931,7 +1040,8 @@ impl TextBuffer {
     }
 
     /// Writes the text buffer contents to a file, handling BOM and encoding.
-    pub fn write_file(&mut self, file: &mut File) -> apperr::Result<()> {
+    /// Does not mark the buffer as clean.
+    pub fn write_file_contents(&mut self, file: &mut File) -> apperr::Result<()> {
         let mut offset = 0;
 
         if self.encoding.starts_with("UTF-8") {
@@ -950,6 +1060,12 @@ impl TextBuffer {
             self.write_file_with_icu(file)?;
         }
 
+        Ok(())
+    }
+
+    /// Writes the text buffer contents to a file, handling BOM and encoding.
+    pub fn write_file(&mut self, file: &mut File) -> apperr::Result<()> {
+        self.write_file_contents(file)?;
         self.mark_as_clean();
         Ok(())
     }
@@ -1741,6 +1857,7 @@ impl TextBuffer {
 
         for y in 0..height {
             line.clear();
+            let mut selection_rect = None;
 
             let visual_line = origin.y + y;
             let mut cursor_beg =
@@ -1843,8 +1960,7 @@ impl TextBuffer {
                     bg = bg.oklab_blend(fb.indexed_alpha(IndexedColor::Background, 1, 2));
                 };
                 let fg = fb.contrasted(bg);
-                fb.blend_bg(rect, bg);
-                fb.blend_fg(rect, fg);
+                selection_rect = Some((rect, bg, fg));
             }
 
             // Nothing to do if the entire line is empty.
@@ -1964,6 +2080,65 @@ impl TextBuffer {
             }
 
             fb.replace_text(destination.top + y, destination.left, destination.right, &line);
+
+            if let Some(highlight) = &self.search_highlight {
+                if !highlight.options.use_regex {
+                    let content_start = self.margin_width as usize;
+                    let content = line.get(content_start..).unwrap_or("");
+                    let matches =
+                        find_search_matches(content, &highlight.needle, highlight.options);
+                    if !matches.is_empty() {
+                        let base_left = destination.left + self.margin_width;
+                        let top = destination.top + y;
+                        let color = fb.indexed_alpha(IndexedColor::BrightYellow, 1, 3);
+
+                        for range in matches {
+                            let left =
+                                base_left + count_columns(content, range.start) as CoordType;
+                            let right =
+                                base_left + count_columns(content, range.end) as CoordType;
+                            if left < right {
+                                fb.blend_bg(Rect { left, top, right, bottom: top + 1 }, color);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if self.language != Language::PlainText {
+                let content_start = self.margin_width as usize;
+                let content = line.get(content_start..).unwrap_or("");
+                let spans = Self::highlight_line(self.language, content);
+                if !spans.is_empty() {
+                    let top = destination.top + y;
+                    let base_left = destination.left + self.margin_width;
+
+                    for span in spans {
+                        if span.start >= span.end {
+                            continue;
+                        }
+
+                        let left = base_left + span.start as CoordType;
+                        let right = (base_left + span.end as CoordType).min(destination.right);
+                        if left >= right {
+                            continue;
+                        }
+
+                        let color = match span.kind {
+                            HighlightKind::Comment => fb.indexed(IndexedColor::BrightGreen),
+                            HighlightKind::String => fb.indexed(IndexedColor::BrightBlue),
+                            HighlightKind::Number => fb.indexed(IndexedColor::BrightMagenta),
+                            HighlightKind::Keyword => fb.indexed(IndexedColor::BrightYellow),
+                        };
+                        fb.blend_fg(Rect { left, top, right, bottom: top + 1 }, color);
+                    }
+                }
+            }
+
+            if let Some((rect, bg, fg)) = selection_rect {
+                fb.blend_bg(rect, bg);
+                fb.blend_fg(rect, fg);
+            }
 
             cursor = cursor_end;
         }
@@ -2844,6 +3019,524 @@ impl TextBuffer {
     pub fn read_forward(&self, off: usize) -> &[u8] {
         self.buffer.read_forward(off)
     }
+}
+
+impl TextBuffer {
+    fn highlight_line(language: Language, line: &str) -> Vec<HighlightSpan> {
+        if line.is_empty() {
+            return Vec::new();
+        }
+
+        let mut spans = Vec::new();
+
+        match language {
+            Language::PlainText => {}
+            Language::Markdown | Language::Mdx => {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('#') {
+                    spans.push(HighlightSpan {
+                        start: 0,
+                        end: line.len(),
+                        kind: HighlightKind::Keyword,
+                    });
+                }
+            }
+            Language::Rust
+            | Language::Toml
+            | Language::Json
+            | Language::Python
+            | Language::JavaScript
+            | Language::TypeScript
+            | Language::Html
+            | Language::Css
+            | Language::Yaml
+            | Language::Shell
+            | Language::C
+            | Language::Cpp
+            | Language::CSharp
+            | Language::Go
+            | Language::Java
+            | Language::Kotlin
+            | Language::Ruby
+            | Language::Php
+            | Language::Sql
+            | Language::Xml
+            | Language::Ini
+            | Language::Lua
+            | Language::Makefile
+            | Language::PowerShell
+            | Language::R
+            | Language::Swift
+            | Language::ObjectiveC
+            | Language::Dart
+            | Language::Scala
+            | Language::Haskell
+            | Language::Elixir
+            | Language::Erlang
+            | Language::Clojure
+            | Language::FSharp
+            | Language::VbNet
+            | Language::Perl
+            | Language::Groovy
+            | Language::Terraform
+            | Language::Nix
+            | Language::Assembly
+            | Language::Latex
+            | Language::Graphql => {
+                let string_ranges = match language {
+                    Language::Rust | Language::Json => Self::scan_strings(line, '"'),
+                    Language::Markdown | Language::Mdx => Vec::new(),
+                    Language::Html => {
+                        let mut ranges = Self::scan_strings(line, '"');
+                        ranges.extend(Self::scan_strings(line, '\''));
+                        ranges
+                    }
+                    Language::Toml | Language::Python | Language::Yaml => {
+                        let mut ranges = Self::scan_strings(line, '"');
+                        ranges.extend(Self::scan_strings(line, '\''));
+                        ranges
+                    }
+                    Language::JavaScript | Language::TypeScript | Language::Css => {
+                        let mut ranges = Self::scan_strings(line, '"');
+                        ranges.extend(Self::scan_strings(line, '\''));
+                        if matches!(language, Language::JavaScript | Language::TypeScript) {
+                            ranges.extend(Self::scan_strings(line, '`'));
+                        }
+                        ranges
+                    }
+                    Language::Shell
+                    | Language::Ruby
+                    | Language::Php
+                    | Language::Ini
+                    | Language::Lua
+                    | Language::Makefile
+                    | Language::PowerShell
+                    | Language::R
+                    | Language::Sql
+                    | Language::Xml
+                    | Language::C
+                    | Language::Cpp
+                    | Language::CSharp
+                    | Language::Go
+                    | Language::Java
+                    | Language::Kotlin
+                    | Language::Swift
+                    | Language::ObjectiveC
+                    | Language::Dart
+                    | Language::Scala
+                    | Language::Haskell
+                    | Language::Elixir
+                    | Language::Erlang
+                    | Language::Clojure
+                    | Language::FSharp
+                    | Language::VbNet
+                    | Language::Perl
+                    | Language::Groovy
+                    | Language::Terraform
+                    | Language::Nix
+                    | Language::Assembly
+                    | Language::Latex
+                    | Language::Graphql => {
+                        let mut ranges = Self::scan_strings(line, '"');
+                        ranges.extend(Self::scan_strings(line, '\''));
+                        ranges
+                    }
+                    _ => Vec::new(),
+                };
+
+                let comment_start = match language {
+                    Language::Rust => Self::find_comment_start(line, "//", &string_ranges),
+                    Language::Toml => Self::find_comment_start(line, "#", &string_ranges),
+                    Language::Python => Self::find_comment_start(line, "#", &string_ranges),
+                    Language::Yaml => Self::find_comment_start(line, "#", &string_ranges),
+                    Language::JavaScript | Language::TypeScript => {
+                        Self::find_comment_start(line, "//", &string_ranges)
+                    }
+                    Language::Css => Self::find_comment_start(line, "/*", &string_ranges),
+                    Language::Html => Self::find_comment_start(line, "<!--", &string_ranges),
+                    Language::Shell
+                    | Language::Ruby
+                    | Language::Ini
+                    | Language::Makefile
+                    | Language::R
+                    | Language::PowerShell => Self::find_comment_start(line, "#", &string_ranges),
+                    Language::C
+                    | Language::Cpp
+                    | Language::CSharp
+                    | Language::Go
+                    | Language::Java
+                    | Language::Kotlin
+                    | Language::Swift
+                    | Language::ObjectiveC
+                    | Language::Dart
+                    | Language::Scala
+                    | Language::FSharp
+                    | Language::Groovy
+                    | Language::Php => Self::find_comment_start(line, "//", &string_ranges),
+                    Language::Sql => Self::find_comment_start(line, "--", &string_ranges),
+                    Language::Lua => Self::find_comment_start(line, "--", &string_ranges),
+                    Language::Xml => Self::find_comment_start(line, "<!--", &string_ranges),
+                    Language::Haskell => Self::find_comment_start(line, "--", &string_ranges),
+                    Language::Elixir => Self::find_comment_start(line, "#", &string_ranges),
+                    Language::Erlang => Self::find_comment_start(line, "%", &string_ranges),
+                    Language::Clojure => Self::find_comment_start(line, ";", &string_ranges),
+                    Language::Terraform | Language::Nix => {
+                        Self::find_comment_start(line, "#", &string_ranges)
+                    }
+                    Language::VbNet => Self::find_comment_start(line, "'", &string_ranges),
+                    Language::Perl => Self::find_comment_start(line, "#", &string_ranges),
+                    Language::Assembly => Self::find_comment_start(line, ";", &string_ranges),
+                    Language::Latex => Self::find_comment_start(line, "%", &string_ranges),
+                    Language::Graphql => Self::find_comment_start(line, "#", &string_ranges),
+                    _ => None,
+                };
+
+                if let Some(start) = comment_start {
+                    spans.push(HighlightSpan {
+                        start,
+                        end: line.len(),
+                        kind: HighlightKind::Comment,
+                    });
+                }
+
+                for range in &string_ranges {
+                    if comment_start.map_or(true, |c| range.start < c) {
+                        spans.push(HighlightSpan {
+                            start: range.start,
+                            end: range.end,
+                            kind: HighlightKind::String,
+                        });
+                    }
+                }
+
+                let word_limit = comment_start.unwrap_or(line.len());
+                let bytes = line.as_bytes();
+
+                let keywords = match language {
+                    Language::Rust => &[
+                        "fn", "let", "mut", "pub", "struct", "enum", "impl", "use", "mod",
+                        "trait", "match", "if", "else", "for", "while", "loop", "return", "self",
+                        "Self", "crate", "super", "const", "static", "ref", "as", "in", "where",
+                        "async", "await",
+                    ][..],
+                    Language::Json => &["true", "false", "null"][..],
+                    Language::Toml => &["true", "false"][..],
+                    Language::Python => &[
+                        "def", "class", "self", "return", "import", "from", "as", "if", "elif",
+                        "else", "for", "while", "try", "except", "finally", "with", "lambda",
+                        "yield", "True", "False", "None", "and", "or", "not", "in", "is",
+                    ][..],
+                    Language::JavaScript | Language::TypeScript => &[
+                        "function", "return", "const", "let", "var", "if", "else", "for", "while",
+                        "do", "switch", "case", "break", "continue", "try", "catch", "finally",
+                        "throw", "class", "extends", "new", "this", "super", "import", "from",
+                        "export", "default", "async", "await", "true", "false", "null", "undefined",
+                    ][..],
+                    Language::Html => &[
+                        "html", "head", "body", "div", "span", "p", "a", "ul", "ol", "li",
+                        "header", "footer", "section", "nav", "main", "img", "input", "button",
+                        "form", "label", "table", "tr", "td", "th", "thead", "tbody", "script",
+                        "style",
+                    ][..],
+                    Language::Css => &[
+                        "color", "background", "display", "flex", "grid", "margin", "padding",
+                        "font", "position", "absolute", "relative", "fixed", "border", "width",
+                        "height", "gap",
+                    ][..],
+                    Language::Yaml => &["true", "false", "null"][..],
+                    Language::Shell => &[
+                        "if", "then", "fi", "for", "do", "done", "case", "esac", "function", "in",
+                    ][..],
+                    Language::C | Language::Cpp => &[
+                        "int", "char", "void", "struct", "class", "namespace", "if", "else", "for",
+                        "while", "return", "const", "static", "typedef", "enum",
+                    ][..],
+                    Language::CSharp => &[
+                        "class", "struct", "interface", "using", "namespace", "public", "private",
+                        "protected", "static", "async", "await", "return", "new",
+                    ][..],
+                    Language::Go => &[
+                        "package", "import", "func", "type", "struct", "interface", "if", "else",
+                        "for", "return", "go", "defer",
+                    ][..],
+                    Language::Java => &[
+                        "class", "interface", "extends", "implements", "public", "private",
+                        "protected", "static", "final", "return", "new", "import",
+                    ][..],
+                    Language::Kotlin => &[
+                        "class", "interface", "fun", "val", "var", "object", "when", "if", "else",
+                        "for", "while", "return", "import",
+                    ][..],
+                    Language::Ruby => &[
+                        "def", "class", "module", "end", "if", "elsif", "else", "true", "false",
+                        "nil", "require", "return",
+                    ][..],
+                    Language::Php => &[
+                        "function", "class", "public", "private", "protected", "echo", "return",
+                        "true", "false", "null", "new",
+                    ][..],
+                    Language::Sql => &[
+                        "select", "from", "where", "join", "insert", "update", "delete", "create",
+                        "table", "into", "values", "and", "or", "null",
+                    ][..],
+                    Language::Xml => &["xml", "doctype"][..],
+                    Language::Ini => &["true", "false", "on", "off"][..],
+                    Language::Lua => &[
+                        "function", "local", "end", "if", "then", "elseif", "else", "for", "while",
+                        "return", "true", "false", "nil",
+                    ][..],
+                    Language::Makefile => &["if", "else", "endif", "include"][..],
+                    Language::PowerShell => &[
+                        "function", "param", "if", "else", "foreach", "return", "$true", "$false",
+                        "$null",
+                    ][..],
+                    Language::R => &[
+                        "function", "if", "else", "for", "while", "return", "TRUE", "FALSE",
+                        "NULL",
+                    ][..],
+                    Language::Swift => &[
+                        "class", "struct", "enum", "protocol", "func", "let", "var", "if", "else",
+                        "for", "while", "return", "import",
+                    ][..],
+                    Language::ObjectiveC => &[
+                        "interface", "implementation", "end", "class", "void", "int", "return",
+                        "if", "else", "for", "while", "nil",
+                    ][..],
+                    Language::Dart => &[
+                        "class", "enum", "extends", "implements", "import", "library", "void",
+                        "final", "var", "if", "else", "for", "while", "return",
+                    ][..],
+                    Language::Scala => &[
+                        "class", "object", "trait", "def", "val", "var", "if", "else", "for",
+                        "while", "match", "case", "return",
+                    ][..],
+                    Language::Haskell => &[
+                        "module", "where", "import", "data", "type", "let", "in", "if", "then",
+                        "else", "case", "of",
+                    ][..],
+                    Language::Elixir => &[
+                        "def", "defmodule", "do", "end", "if", "else", "case", "when", "true",
+                        "false", "nil",
+                    ][..],
+                    Language::Erlang => &[
+                        "module", "export", "fun", "if", "case", "of", "end", "true", "false",
+                    ][..],
+                    Language::Clojure => &[
+                        "def", "defn", "let", "if", "do", "fn", "true", "false", "nil",
+                    ][..],
+                    Language::FSharp => &[
+                        "let", "module", "type", "open", "if", "then", "else", "match", "with",
+                        "fun", "true", "false",
+                    ][..],
+                    Language::VbNet => &[
+                        "Class", "Module", "Sub", "Function", "End", "If", "Then", "Else",
+                        "Dim", "As", "Return",
+                    ][..],
+                    Language::Perl => &[
+                        "my", "our", "sub", "use", "if", "else", "elsif", "return", "undef",
+                    ][..],
+                    Language::Groovy => &[
+                        "class", "def", "import", "if", "else", "for", "while", "return", "new",
+                    ][..],
+                    Language::Terraform => &[
+                        "resource", "variable", "output", "module", "provider", "data", "true",
+                        "false",
+                    ][..],
+                    Language::Nix => &[
+                        "let", "in", "with", "rec", "if", "then", "else", "true", "false", "null",
+                    ][..],
+                    Language::Assembly => &["mov", "add", "sub", "jmp", "call", "ret"][..],
+                    Language::Latex => &[
+                        "documentclass", "begin", "end", "usepackage", "section", "subsection",
+                        "title", "author",
+                    ][..],
+                    Language::Graphql => &[
+                        "query", "mutation", "subscription", "fragment", "on", "true", "false",
+                        "null",
+                    ][..],
+                    _ => &[][..],
+                };
+
+                let mut i = 0;
+                while i < word_limit {
+                    let b = bytes[i];
+                    let is_word_start = b.is_ascii_alphabetic() || b == b'_';
+                    if !is_word_start {
+                        i += 1;
+                        continue;
+                    }
+
+                    let start = i;
+                    i += 1;
+                    while i < word_limit {
+                        let b = bytes[i];
+                        if !(b.is_ascii_alphanumeric() || b == b'_') {
+                            break;
+                        }
+                        i += 1;
+                    }
+
+                    if !Self::is_in_ranges(start, &string_ranges) {
+                        let word = &line[start..i];
+                        if keywords.iter().any(|&kw| kw == word) {
+                            spans.push(HighlightSpan {
+                                start,
+                                end: i,
+                                kind: HighlightKind::Keyword,
+                            });
+                        }
+                    }
+                }
+
+                let mut i = 0;
+                while i < word_limit {
+                    let b = bytes[i];
+                    if !b.is_ascii_digit() || Self::is_in_ranges(i, &string_ranges) {
+                        i += 1;
+                        continue;
+                    }
+                    let start = i;
+                    i += 1;
+                    while i < word_limit {
+                        let b = bytes[i];
+                        if !(b.is_ascii_digit() || b == b'.' || b == b'_') {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    spans.push(HighlightSpan {
+                        start,
+                        end: i,
+                        kind: HighlightKind::Number,
+                    });
+                }
+            }
+        }
+
+        spans
+    }
+
+    fn scan_strings(line: &str, quote: char) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        let bytes = line.as_bytes();
+        let quote = quote as u8;
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] != quote || Self::is_escaped(bytes, i) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == quote && !Self::is_escaped(bytes, i) {
+                    ranges.push(start..(i + 1));
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        }
+
+        ranges
+    }
+
+    fn is_escaped(bytes: &[u8], index: usize) -> bool {
+        if index == 0 {
+            return false;
+        }
+
+        let mut i = index;
+        let mut count = 0;
+        while i > 0 {
+            i -= 1;
+            if bytes[i] != b'\\' {
+                break;
+            }
+            count += 1;
+        }
+        count % 2 == 1
+    }
+
+    fn is_in_ranges(index: usize, ranges: &[Range<usize>]) -> bool {
+        ranges.iter().any(|r| r.start <= index && index < r.end)
+    }
+
+    fn find_comment_start(
+        line: &str,
+        needle: &str,
+        string_ranges: &[Range<usize>],
+    ) -> Option<usize> {
+        for (idx, _) in line.match_indices(needle) {
+            if !Self::is_in_ranges(idx, string_ranges) {
+                return Some(idx);
+            }
+        }
+        None
+    }
+}
+
+fn find_search_matches(line: &str, needle: &str, options: SearchOptions) -> Vec<Range<usize>> {
+    if line.is_empty() || needle.is_empty() {
+        return Vec::new();
+    }
+
+    let (haystack, needle_cmp): (Cow<'_, str>, Cow<'_, str>) = if options.match_case {
+        (Cow::Borrowed(line), Cow::Borrowed(needle))
+    } else {
+        let line_lower = String::from_utf8(
+            line.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
+        )
+        .unwrap();
+        let needle_lower = String::from_utf8(
+            needle.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
+        )
+        .unwrap();
+        (Cow::Owned(line_lower), Cow::Owned(needle_lower))
+    };
+    let haystack = haystack.as_ref();
+    let needle_cmp = needle_cmp.as_ref();
+
+    let mut matches = Vec::new();
+    let needle_len = needle_cmp.len();
+    let mut search_start = 0;
+    while search_start < haystack.len() {
+        let Some(pos) = haystack[search_start..].find(needle_cmp) else {
+            break;
+        };
+        let start = search_start + pos;
+        let end = start + needle_len;
+        if options.whole_word && !is_word_boundary(line.as_bytes(), start, end) {
+            search_start = start + 1;
+            continue;
+        }
+        matches.push(start..end);
+        if needle_len == 0 {
+            search_start = start + 1;
+        } else {
+            search_start = end;
+        }
+    }
+
+    matches
+}
+
+fn is_word_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
+    let before = start > 0 && is_word_byte(bytes[start - 1]);
+    let after = end < bytes.len() && is_word_byte(bytes[end]);
+    !before && !after
+}
+
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn count_columns(text: &str, byte_off: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut cfg = MeasurementConfig::new(&bytes);
+    let cursor = cfg.goto_offset(byte_off.min(text.len()));
+    cursor.visual_pos.x as usize
 }
 
 pub enum Bom {

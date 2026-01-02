@@ -1,10 +1,10 @@
-# ![Application Icon for Edit](./assets/edit.svg) Edit
+# ![Application Icon for Edit32](./assets/edit.svg) Edit32
 
 A simple editor for simple needs.
 
 This editor pays homage to the classic [MS-DOS Editor](https://en.wikipedia.org/wiki/MS-DOS_Editor), but with a modern interface and input controls similar to VS Code. The goal is to provide an accessible editor that even users largely unfamiliar with terminals can easily use.
 
-![Screenshot of Edit with the About dialog in the foreground](./assets/edit_hero_image.png)
+![Screenshot of Edit32 with the About dialog in the foreground](./assets/edit_hero_image.png)
 
 ## Installation
 
@@ -16,7 +16,7 @@ You can also download binaries from [our Releases page](https://github.com/micro
 
 You can install the latest version with WinGet:
 ```powershell
-winget install Microsoft.Edit
+winget install Edit32
 ```
 
 ## Build Instructions
@@ -28,6 +28,7 @@ winget install Microsoft.Edit
 * For a release build, run:
   * Rust 1.90 or earlier: `cargo build --config .cargo/release.toml --release`
   * otherwise: `cargo build --config .cargo/release-nightly.toml --release`
+* To run locally: `cargo run --bin edit32`
 
 ### Build Configuration
 
@@ -42,10 +43,10 @@ Environment variable | Description
 
 ### Package Naming
 
-The canonical executable name is "edit" and the alternative name is "msedit".
-We're aware of the potential conflict of "edit" with existing commands and recommend alternatively naming packages and executables "msedit".
-Names such as "ms-edit" should be avoided.
-Assigning an "edit" alias is recommended, if possible.
+The canonical executable name is "edit32" and the alternative name is "msedit32".
+We're aware of the potential conflict of "edit32" with existing commands and recommend alternatively naming packages and executables "msedit32".
+Names such as "ms-edit32" should be avoided.
+Assigning an "edit32" alias is recommended, if possible.
 
 ### ICU library name (SONAME)
 

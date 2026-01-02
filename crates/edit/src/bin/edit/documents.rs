@@ -4,9 +4,11 @@
 use std::collections::LinkedList;
 use std::ffi::OsStr;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use edit::buffer::{RcTextBuffer, TextBuffer};
+use edit::buffer::{Language, RcTextBuffer, TextBuffer};
+use crate::config::EditorSettings;
 use edit::helpers::{CoordType, Point};
 use edit::{apperr, path, sys};
 
@@ -19,17 +21,23 @@ pub struct Document {
     pub filename: String,
     pub file_id: Option<sys::FileId>,
     pub new_file_counter: usize,
+    pub mode: DocumentMode,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DocumentMode {
+    Text,
+    LargeText,
+    Hex,
 }
 
 impl Document {
     pub fn save(&mut self, new_path: Option<PathBuf>) -> apperr::Result<()> {
         let path = new_path.as_deref().unwrap_or_else(|| self.path.as_ref().unwrap().as_path());
-        let mut file = DocumentManager::open_for_writing(path)?;
 
-        {
-            let mut tb = self.buffer.borrow_mut();
-            tb.write_file(&mut file)?;
-        }
+        let buffer = self.buffer.clone();
+        sys::atomic_write(path, |file| buffer.borrow_mut().write_file_contents(file))?;
+        self.buffer.borrow_mut().mark_as_clean();
 
         if let Ok(id) = sys::file_id(None, path) {
             self.file_id = Some(id);
@@ -65,17 +73,111 @@ impl Document {
         self.dir = Some(DisplayablePathBuf::from_path(dir));
         self.path = Some(path);
         self.update_file_mode();
+        self.update_language();
     }
 
     fn update_file_mode(&mut self) {
         let mut tb = self.buffer.borrow_mut();
         tb.set_ruler(if self.filename == "COMMIT_EDITMSG" { 72 } else { 0 });
     }
+
+    fn update_language(&mut self) {
+        let language = if self.mode != DocumentMode::Text {
+            Language::PlainText
+        } else {
+            self.path
+                .as_ref()
+                .map(|path| language_for_path(path))
+                .unwrap_or(Language::PlainText)
+        };
+        self.buffer.borrow_mut().set_language(language);
+    }
+
+    fn apply_mode_settings(&mut self, settings: &EditorSettings) {
+        let mut tb = self.buffer.borrow_mut();
+        match self.mode {
+            DocumentMode::Text => {
+                tb.set_word_wrap(settings.word_wrap);
+                tb.set_line_highlight_enabled(true);
+                tb.set_margin_enabled(true);
+            }
+            DocumentMode::LargeText => {
+                tb.set_word_wrap(false);
+                tb.set_line_highlight_enabled(false);
+                tb.set_margin_enabled(false);
+            }
+            DocumentMode::Hex => {
+                tb.set_word_wrap(false);
+                tb.set_line_highlight_enabled(false);
+                tb.set_margin_enabled(false);
+            }
+        }
+    }
+}
+
+fn language_for_path(path: &Path) -> Language {
+    if let Some(name) = path.file_name().and_then(OsStr::to_str) {
+        if name == "Makefile" {
+            return Language::Makefile;
+        }
+    }
+    let ext = path.extension().and_then(OsStr::to_str).unwrap_or_default();
+    match ext.to_ascii_lowercase().as_str() {
+        "rs" => Language::Rust,
+        "toml" => Language::Toml,
+        "json" => Language::Json,
+        "md" | "markdown" => Language::Markdown,
+        "py" => Language::Python,
+        "js" | "mjs" | "cjs" => Language::JavaScript,
+        "ts" | "tsx" | "jsx" => Language::TypeScript,
+        "html" | "htm" => Language::Html,
+        "css" => Language::Css,
+        "yml" | "yaml" => Language::Yaml,
+        "sh" | "bash" | "zsh" => Language::Shell,
+        "c" | "h" => Language::C,
+        "cpp" | "hpp" | "cc" | "cxx" | "hh" => Language::Cpp,
+        "cs" => Language::CSharp,
+        "go" => Language::Go,
+        "java" => Language::Java,
+        "kt" => Language::Kotlin,
+        "rb" => Language::Ruby,
+        "php" => Language::Php,
+        "sql" => Language::Sql,
+        "xml" => Language::Xml,
+        "ini" => Language::Ini,
+        "lua" => Language::Lua,
+        "ps1" => Language::PowerShell,
+        "r" => Language::R,
+        "swift" => Language::Swift,
+        "m" | "mm" => Language::ObjectiveC,
+        "dart" => Language::Dart,
+        "scala" => Language::Scala,
+        "hs" => Language::Haskell,
+        "ex" | "exs" => Language::Elixir,
+        "erl" | "hrl" => Language::Erlang,
+        "clj" | "cljs" | "cljc" => Language::Clojure,
+        "fs" | "fsi" | "fsx" => Language::FSharp,
+        "vb" => Language::VbNet,
+        "pl" | "pm" | "t" => Language::Perl,
+        "groovy" | "gvy" | "gradle" => Language::Groovy,
+        "tf" | "tfvars" => Language::Terraform,
+        "nix" => Language::Nix,
+        "asm" | "s" => Language::Assembly,
+        "tex" | "sty" | "cls" => Language::Latex,
+        "mdx" => Language::Mdx,
+        "graphql" | "gql" => Language::Graphql,
+        _ => Language::PlainText,
+    }
 }
 
 #[derive(Default)]
 pub struct DocumentManager {
     list: LinkedList<Document>,
+}
+
+pub enum OpenOutcome {
+    Opened,
+    BinaryDetected { path: PathBuf, goto: Option<Point> },
 }
 
 impl DocumentManager {
@@ -95,6 +197,11 @@ impl DocumentManager {
     }
 
     #[inline]
+    pub fn iter(&self) -> std::collections::linked_list::Iter<'_, Document> {
+        self.list.iter()
+    }
+
+    #[inline]
     pub fn update_active<F: FnMut(&Document) -> bool>(&mut self, mut func: F) -> bool {
         let mut cursor = self.list.cursor_front_mut();
         while let Some(doc) = cursor.current() {
@@ -108,12 +215,33 @@ impl DocumentManager {
         false
     }
 
+    pub fn is_open_and_dirty(&self, path: &Path) -> bool {
+        let path = path::normalize(path);
+        self.list.iter().any(|doc| {
+            doc.path.as_deref() == Some(path.as_path()) && doc.buffer.borrow().is_dirty()
+        })
+    }
+
+    pub fn reload_if_open_and_clean(&mut self, path: &Path) -> apperr::Result<()> {
+        let path = path::normalize(path);
+        for doc in &mut self.list {
+            if doc.path.as_deref() == Some(path.as_path()) {
+                if doc.buffer.borrow().is_dirty() {
+                    return Ok(());
+                }
+                doc.reread(None)?;
+                doc.buffer.borrow_mut().mark_as_clean();
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_active(&mut self) {
         self.list.pop_front();
     }
 
-    pub fn add_untitled(&mut self) -> apperr::Result<&mut Document> {
-        let buffer = Self::create_buffer()?;
+    pub fn add_untitled(&mut self, settings: &EditorSettings) -> apperr::Result<&mut Document> {
+        let buffer = Self::create_buffer(settings)?;
         let mut doc = Document {
             buffer,
             path: None,
@@ -121,8 +249,10 @@ impl DocumentManager {
             filename: Default::default(),
             file_id: None,
             new_file_counter: 0,
+            mode: DocumentMode::Text,
         };
         self.gen_untitled_name(&mut doc);
+        doc.apply_mode_settings(settings);
 
         self.list.push_front(doc);
         Ok(self.list.front_mut().unwrap())
@@ -139,7 +269,11 @@ impl DocumentManager {
         doc.new_file_counter = new_file_counter;
     }
 
-    pub fn add_file_path(&mut self, path: &Path) -> apperr::Result<&mut Document> {
+    pub fn add_file_path(
+        &mut self,
+        path: &Path,
+        settings: &EditorSettings,
+    ) -> apperr::Result<OpenOutcome> {
         let (path, goto) = Self::parse_filename_goto(path);
         let path = path::normalize(path);
 
@@ -150,6 +284,8 @@ impl DocumentManager {
         };
 
         let file_id = if file.is_some() { Some(sys::file_id(file.as_ref(), &path)?) } else { None };
+        let mut is_large = false;
+        let mut is_binary = false;
 
         // Check if the file is already open.
         if file_id.is_some() && self.update_active(|doc| doc.file_id == file_id) {
@@ -157,10 +293,25 @@ impl DocumentManager {
             if let Some(goto) = goto {
                 doc.buffer.borrow_mut().cursor_move_to_logical(goto);
             }
-            return Ok(doc);
+            return Ok(OpenOutcome::Opened);
         }
 
-        let buffer = Self::create_buffer()?;
+        if let Some(file) = &mut file {
+            if let Ok(meta) = file.metadata() {
+                is_large = meta.len() > settings.large_file_threshold_bytes;
+            }
+
+            let mut probe = [0u8; 4096];
+            let read = file.read(&mut probe)?;
+            is_binary = probe[..read].iter().any(|&b| b == 0);
+            file.seek(SeekFrom::Start(0))?;
+        }
+
+        if is_binary {
+            return Ok(OpenOutcome::BinaryDetected { path: path.to_path_buf(), goto });
+        }
+
+        let buffer = Self::create_buffer(settings)?;
         {
             if let Some(file) = &mut file {
                 let mut tb = buffer.borrow_mut();
@@ -181,8 +332,10 @@ impl DocumentManager {
             filename: Default::default(),
             file_id,
             new_file_counter: 0,
+            mode: if is_large { DocumentMode::LargeText } else { DocumentMode::Text },
         };
         doc.set_path(path);
+        doc.apply_mode_settings(settings);
 
         if let Some(active) = self.active()
             && active.path.is_none()
@@ -195,7 +348,7 @@ impl DocumentManager {
         }
 
         self.list.push_front(doc);
-        Ok(self.list.front_mut().unwrap())
+        Ok(OpenOutcome::Opened)
     }
 
     pub fn reflow_all(&self) {
@@ -209,17 +362,59 @@ impl DocumentManager {
         File::open(path).map_err(apperr::Error::from)
     }
 
-    pub fn open_for_writing(path: &Path) -> apperr::Result<File> {
-        File::create(path).map_err(apperr::Error::from)
+    pub fn add_file_path_hex(
+        &mut self,
+        path: &Path,
+        settings: &EditorSettings,
+    ) -> apperr::Result<()> {
+        let path = path::normalize(path);
+        let mut file = Self::open_for_reading(&path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+
+        let buffer = Self::create_buffer(settings)?;
+        {
+            let mut tb = buffer.borrow_mut();
+            let hex = format_hex_view(&bytes);
+            tb.copy_from_str(&hex);
+            tb.mark_as_clean();
+        }
+
+        let file_id = Some(sys::file_id(Some(&file), &path)?);
+        let mut doc = Document {
+            buffer,
+            path: None,
+            dir: None,
+            filename: Default::default(),
+            file_id,
+            new_file_counter: 0,
+            mode: DocumentMode::Hex,
+        };
+        doc.set_path(path);
+        doc.apply_mode_settings(settings);
+
+        if let Some(active) = self.active()
+            && active.path.is_none()
+            && active.file_id.is_none()
+            && !active.buffer.borrow().is_dirty()
+        {
+            self.remove_active();
+        }
+
+        self.list.push_front(doc);
+        Ok(())
     }
 
-    fn create_buffer() -> apperr::Result<RcTextBuffer> {
+    fn create_buffer(settings: &EditorSettings) -> apperr::Result<RcTextBuffer> {
         let buffer = TextBuffer::new_rc(false)?;
         {
             let mut tb = buffer.borrow_mut();
             tb.set_insert_final_newline(!cfg!(windows)); // As mandated by POSIX.
             tb.set_margin_enabled(true);
             tb.set_line_highlight_enabled(true);
+            tb.set_word_wrap(settings.word_wrap);
+            tb.set_tab_size(settings.tab_size);
+            tb.set_indent_with_tabs(settings.indent_with_tabs);
         }
         Ok(buffer)
     }
@@ -280,6 +475,33 @@ impl DocumentManager {
         let path = Path::new(path);
         (path, Some(goto))
     }
+}
+
+fn format_hex_view(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut offset = 0usize;
+    for chunk in bytes.chunks(16) {
+        out.push_str(&format!("{offset:08x}  "));
+        for i in 0..16 {
+            if let Some(b) = chunk.get(i) {
+                out.push_str(&format!("{b:02x} "));
+            } else {
+                out.push_str("   ");
+            }
+            if i == 7 {
+                out.push(' ');
+            }
+        }
+        out.push_str(" |");
+        for &b in chunk {
+            let ch = if (0x20..=0x7e).contains(&b) { b as char } else { '.' };
+            out.push(ch);
+        }
+        out.push('|');
+        out.push('\n');
+        offset += chunk.len();
+    }
+    out
 }
 
 #[cfg(test)]
