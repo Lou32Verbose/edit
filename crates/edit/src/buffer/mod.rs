@@ -379,6 +379,29 @@ impl TextBuffer {
         self.buffer.len()
     }
 
+    /// Counts the number of words in the document.
+    /// A word is defined as a sequence of non-whitespace characters.
+    pub fn word_count(&self) -> usize {
+        let text = self.buffer.read_forward(0);
+        count_words(text)
+    }
+
+    /// Counts the number of words in the current selection.
+    /// Returns None if there's no selection.
+    pub fn selection_word_count(&self) -> Option<usize> {
+        let (beg, end) = self.selection_range()?;
+        let mut content = Vec::new();
+        self.buffer.extract_raw(beg.offset..end.offset, &mut content, 0);
+        Some(count_words(&content))
+    }
+
+    /// Returns the byte length of the current selection.
+    /// Returns None if there's no selection.
+    pub fn selection_length(&self) -> Option<usize> {
+        let (beg, end) = self.selection_range()?;
+        Some(end.offset - beg.offset)
+    }
+
     /// Number of logical lines in the document,
     /// that is, lines separated by newlines.
     pub fn logical_line_count(&self) -> CoordType {
@@ -2880,6 +2903,131 @@ impl TextBuffer {
         self.set_selection(None);
     }
 
+    /// Removes duplicate lines from the selection (or all lines if no selection),
+    /// keeping the first occurrence of each unique line.
+    pub fn remove_duplicate_lines(&mut self) {
+        let cursor = self.cursor;
+
+        // Get the line range
+        let [beg_y, end_y] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [0, self.stats.logical_lines - 1],
+        };
+
+        if end_y < beg_y {
+            return;
+        }
+
+        // Get offsets for the lines
+        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+
+        // Extract the content
+        let mut content = Vec::new();
+        self.buffer.extract_raw(start_cursor.offset..end_cursor.offset, &mut content, 0);
+
+        // Split into lines and remove duplicates (preserving order)
+        let content_str = String::from_utf8_lossy(&content);
+        let mut seen = std::collections::HashSet::new();
+        let unique_lines: Vec<&str> = content_str
+            .lines()
+            .filter(|line| seen.insert(*line))
+            .collect();
+
+        // If no duplicates were removed, do nothing
+        if unique_lines.len() == content_str.lines().count() {
+            return;
+        }
+
+        // Rejoin with newlines
+        let newline = if self.newlines_are_crlf { "\r\n" } else { "\n" };
+        let mut result = unique_lines.join(newline);
+        result.push_str(newline);
+
+        // Replace the content
+        self.edit_begin_grouping();
+
+        self.cursor_move_to_offset(start_cursor.offset);
+        self.edit_begin(HistoryType::Delete, self.cursor);
+        self.edit_delete(end_cursor);
+        self.edit_end();
+
+        self.edit_begin(HistoryType::Write, self.cursor);
+        self.write_raw(result.as_bytes());
+        self.edit_end();
+
+        self.edit_end_grouping();
+
+        // Restore cursor position (clamped to new bounds)
+        let new_y = cursor.logical_pos.y.min(beg_y + unique_lines.len() as CoordType - 1);
+        self.cursor_move_to_logical(Point { x: cursor.logical_pos.x, y: new_y });
+        self.set_selection(None);
+    }
+
+    /// Removes empty lines from the selection (or all lines if no selection).
+    /// Lines containing only whitespace are also considered empty.
+    pub fn remove_empty_lines(&mut self) {
+        let cursor = self.cursor;
+
+        // Get the line range
+        let [beg_y, end_y] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [0, self.stats.logical_lines - 1],
+        };
+
+        if end_y < beg_y {
+            return;
+        }
+
+        // Get offsets for the lines
+        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+
+        // Extract the content
+        let mut content = Vec::new();
+        self.buffer.extract_raw(start_cursor.offset..end_cursor.offset, &mut content, 0);
+
+        // Split into lines and filter out empty ones
+        let content_str = String::from_utf8_lossy(&content);
+        let non_empty_lines: Vec<&str> = content_str
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+
+        // If no empty lines were removed, do nothing
+        if non_empty_lines.len() == content_str.lines().count() {
+            return;
+        }
+
+        // Rejoin with newlines
+        let newline = if self.newlines_are_crlf { "\r\n" } else { "\n" };
+        let mut result = non_empty_lines.join(newline);
+        if !non_empty_lines.is_empty() {
+            result.push_str(newline);
+        }
+
+        // Replace the content
+        self.edit_begin_grouping();
+
+        self.cursor_move_to_offset(start_cursor.offset);
+        self.edit_begin(HistoryType::Delete, self.cursor);
+        self.edit_delete(end_cursor);
+        self.edit_end();
+
+        if !result.is_empty() {
+            self.edit_begin(HistoryType::Write, self.cursor);
+            self.write_raw(result.as_bytes());
+            self.edit_end();
+        }
+
+        self.edit_end_grouping();
+
+        // Restore cursor position (clamped to new bounds)
+        let new_y = cursor.logical_pos.y.min(beg_y + non_empty_lines.len().saturating_sub(1) as CoordType);
+        self.cursor_move_to_logical(Point { x: cursor.logical_pos.x, y: new_y });
+        self.set_selection(None);
+    }
+
     /// Trims trailing whitespace from all lines.
     pub fn trim_trailing_whitespace(&mut self) {
         self.edit_begin_grouping();
@@ -4758,4 +4906,23 @@ fn to_title_case(s: &str) -> String {
     }
 
     result
+}
+
+/// Counts words in a byte slice.
+/// A word is a sequence of non-whitespace characters.
+fn count_words(text: &[u8]) -> usize {
+    let mut count = 0;
+    let mut in_word = false;
+
+    for &byte in text {
+        let is_whitespace = byte.is_ascii_whitespace();
+        if in_word && is_whitespace {
+            in_word = false;
+        } else if !in_word && !is_whitespace {
+            in_word = true;
+            count += 1;
+        }
+    }
+
+    count
 }

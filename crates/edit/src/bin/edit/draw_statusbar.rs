@@ -169,6 +169,29 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
             ),
         );
 
+        if let Some(sel_len) = tb.selection_length() {
+            let sel_words = tb.selection_word_count().unwrap_or(0);
+            ctx.label(
+                "selection-stats",
+                &arena_format!(
+                    ctx.arena(),
+                    "Sel: {} words, {} chars",
+                    sel_words,
+                    sel_len
+                ),
+            );
+        } else {
+            ctx.label(
+                "doc-stats",
+                &arena_format!(
+                    ctx.arena(),
+                    "{} words, {} chars",
+                    tb.word_count(),
+                    tb.text_length()
+                ),
+            );
+        }
+
         #[cfg(feature = "debug-latency")]
         ctx.label(
             "stats",

@@ -45,6 +45,8 @@ pub enum CommandId {
     EditJoinLines,
     EditSortLinesAsc,
     EditSortLinesDesc,
+    EditRemoveDuplicateLines,
+    EditRemoveEmptyLines,
     EditTrimWhitespace,
     EditMoveLineUp,
     EditMoveLineDown,
@@ -125,6 +127,8 @@ pub fn command_list() -> Vec<Command> {
         Command { id: EditJoinLines, label: "Join Lines", requires_document: true, show_in_palette: true },
         Command { id: EditSortLinesAsc, label: "Sort Lines (Ascending)", requires_document: true, show_in_palette: true },
         Command { id: EditSortLinesDesc, label: "Sort Lines (Descending)", requires_document: true, show_in_palette: true },
+        Command { id: EditRemoveDuplicateLines, label: "Remove Duplicate Lines", requires_document: true, show_in_palette: true },
+        Command { id: EditRemoveEmptyLines, label: "Remove Empty Lines", requires_document: true, show_in_palette: true },
         Command { id: EditTrimWhitespace, label: "Trim Trailing Whitespace", requires_document: true, show_in_palette: true },
         Command { id: EditMoveLineUp, label: "Move Line Up", requires_document: true, show_in_palette: true },
         Command { id: EditMoveLineDown, label: "Move Line Down", requires_document: true, show_in_palette: true },
@@ -197,6 +201,8 @@ pub fn shortcut(id: CommandId) -> InputKey {
         EditJoinLines => kbmod::CTRL | vk::J,
         EditSortLinesAsc => vk::NULL,
         EditSortLinesDesc => vk::NULL,
+        EditRemoveDuplicateLines => vk::NULL,
+        EditRemoveEmptyLines => vk::NULL,
         EditTrimWhitespace => vk::NULL,
         EditMoveLineUp => kbmod::ALT | vk::UP,
         EditMoveLineDown => kbmod::ALT | vk::DOWN,
@@ -345,6 +351,18 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
         EditSortLinesDesc => {
             if let Some(doc) = state.documents.active() {
                 doc.buffer.borrow_mut().sort_lines(true);
+                ctx.needs_rerender();
+            }
+        }
+        EditRemoveDuplicateLines => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().remove_duplicate_lines();
+                ctx.needs_rerender();
+            }
+        }
+        EditRemoveEmptyLines => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().remove_empty_lines();
                 ctx.needs_rerender();
             }
         }
@@ -582,6 +600,8 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         | CommandId::EditJoinLines
         | CommandId::EditSortLinesAsc
         | CommandId::EditSortLinesDesc
+        | CommandId::EditRemoveDuplicateLines
+        | CommandId::EditRemoveEmptyLines
         | CommandId::EditTrimWhitespace
         | CommandId::EditMoveLineUp
         | CommandId::EditMoveLineDown
