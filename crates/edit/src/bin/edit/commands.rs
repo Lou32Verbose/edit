@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use edit::buffer::MoveLineDirection;
 use edit::input::{kbmod, vk, InputKey};
 use edit::tui::Context;
 
@@ -38,17 +39,30 @@ pub enum CommandId {
     EditFind,
     EditReplace,
     EditSelectAll,
+    EditSelectLine,
     EditDuplicateLine,
     EditDeleteLine,
     EditJoinLines,
     EditSortLinesAsc,
     EditSortLinesDesc,
     EditTrimWhitespace,
+    EditMoveLineUp,
+    EditMoveLineDown,
     EditToggleLineComment,
     EditToggleBlockComment,
     EditGotoMatchingBracket,
+    EditEncodeBase64,
+    EditDecodeBase64,
+    EditEncodeUrl,
+    EditDecodeUrl,
+    EditEncodeHex,
+    EditDecodeHex,
+    EditConvertUppercase,
+    EditConvertLowercase,
+    EditConvertTitleCase,
     FindInFiles,
     ViewWordWrap,
+    ViewShowWhitespace,
     ViewGoToFile,
     FileGoto,
     HelpAbout,
@@ -105,17 +119,30 @@ pub fn command_list() -> Vec<Command> {
         Command { id: EditFind, label: loc(LocId::EditFind), requires_document: true, show_in_palette: true },
         Command { id: EditReplace, label: loc(LocId::EditReplace), requires_document: true, show_in_palette: true },
         Command { id: EditSelectAll, label: loc(LocId::EditSelectAll), requires_document: true, show_in_palette: true },
+        Command { id: EditSelectLine, label: "Select Line", requires_document: true, show_in_palette: true },
         Command { id: EditDuplicateLine, label: "Duplicate Line", requires_document: true, show_in_palette: true },
         Command { id: EditDeleteLine, label: "Delete Line", requires_document: true, show_in_palette: true },
         Command { id: EditJoinLines, label: "Join Lines", requires_document: true, show_in_palette: true },
         Command { id: EditSortLinesAsc, label: "Sort Lines (Ascending)", requires_document: true, show_in_palette: true },
         Command { id: EditSortLinesDesc, label: "Sort Lines (Descending)", requires_document: true, show_in_palette: true },
         Command { id: EditTrimWhitespace, label: "Trim Trailing Whitespace", requires_document: true, show_in_palette: true },
+        Command { id: EditMoveLineUp, label: "Move Line Up", requires_document: true, show_in_palette: true },
+        Command { id: EditMoveLineDown, label: "Move Line Down", requires_document: true, show_in_palette: true },
         Command { id: EditToggleLineComment, label: "Toggle Line Comment", requires_document: true, show_in_palette: true },
         Command { id: EditToggleBlockComment, label: "Toggle Block Comment", requires_document: true, show_in_palette: true },
         Command { id: EditGotoMatchingBracket, label: "Go to Matching Bracket", requires_document: true, show_in_palette: true },
+        Command { id: EditEncodeBase64, label: "Encode Base64", requires_document: true, show_in_palette: true },
+        Command { id: EditDecodeBase64, label: "Decode Base64", requires_document: true, show_in_palette: true },
+        Command { id: EditEncodeUrl, label: "URL Encode", requires_document: true, show_in_palette: true },
+        Command { id: EditDecodeUrl, label: "URL Decode", requires_document: true, show_in_palette: true },
+        Command { id: EditEncodeHex, label: "Encode Hex", requires_document: true, show_in_palette: true },
+        Command { id: EditDecodeHex, label: "Decode Hex", requires_document: true, show_in_palette: true },
+        Command { id: EditConvertUppercase, label: "Convert to Uppercase", requires_document: true, show_in_palette: true },
+        Command { id: EditConvertLowercase, label: "Convert to Lowercase", requires_document: true, show_in_palette: true },
+        Command { id: EditConvertTitleCase, label: "Convert to Title Case", requires_document: true, show_in_palette: true },
         Command { id: FindInFiles, label: "Find in Files", requires_document: false, show_in_palette: true },
         Command { id: ViewWordWrap, label: loc(LocId::ViewWordWrap), requires_document: true, show_in_palette: true },
+        Command { id: ViewShowWhitespace, label: "Show Whitespace", requires_document: true, show_in_palette: true },
         Command { id: ViewGoToFile, label: loc(LocId::ViewGoToFile), requires_document: true, show_in_palette: true },
         Command { id: FileGoto, label: loc(LocId::FileGoto), requires_document: true, show_in_palette: true },
         Command { id: HelpAbout, label: loc(LocId::HelpAbout), requires_document: false, show_in_palette: true },
@@ -164,17 +191,30 @@ pub fn shortcut(id: CommandId) -> InputKey {
         EditFind => kbmod::CTRL | vk::F,
         EditReplace => kbmod::CTRL | vk::R,
         EditSelectAll => kbmod::CTRL | vk::A,
+        EditSelectLine => kbmod::CTRL | vk::L,
         EditDuplicateLine => kbmod::CTRL | vk::D,
         EditDeleteLine => kbmod::CTRL_SHIFT | vk::K,
         EditJoinLines => kbmod::CTRL | vk::J,
         EditSortLinesAsc => vk::NULL,
         EditSortLinesDesc => vk::NULL,
         EditTrimWhitespace => vk::NULL,
+        EditMoveLineUp => kbmod::ALT | vk::UP,
+        EditMoveLineDown => kbmod::ALT | vk::DOWN,
         EditToggleLineComment => vk::NULL, // TODO: Need special handling for Ctrl+/
         EditToggleBlockComment => vk::NULL, // TODO: Need special handling for Ctrl+Shift+/
         EditGotoMatchingBracket => kbmod::CTRL | vk::M, // Ctrl+M (common alternative)
+        EditEncodeBase64 => vk::NULL,
+        EditDecodeBase64 => vk::NULL,
+        EditEncodeUrl => vk::NULL,
+        EditDecodeUrl => vk::NULL,
+        EditEncodeHex => vk::NULL,
+        EditDecodeHex => vk::NULL,
+        EditConvertUppercase => kbmod::ALT_SHIFT | vk::U,
+        EditConvertLowercase => kbmod::ALT | vk::U,
+        EditConvertTitleCase => vk::NULL,
         FindInFiles => vk::F4,
         ViewWordWrap => kbmod::ALT | vk::Z,
+        ViewShowWhitespace => kbmod::ALT | vk::W,
         ViewGoToFile => kbmod::CTRL | vk::P,
         FileGoto => kbmod::CTRL | vk::G,
         HelpAbout => vk::NULL,
@@ -272,6 +312,12 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
                 ctx.needs_rerender();
             }
         }
+        EditSelectLine => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().select_line();
+                ctx.needs_rerender();
+            }
+        }
         EditDuplicateLine => {
             if let Some(doc) = state.documents.active() {
                 doc.buffer.borrow_mut().duplicate_lines();
@@ -308,6 +354,18 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
                 ctx.needs_rerender();
             }
         }
+        EditMoveLineUp => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().move_selected_lines(MoveLineDirection::Up);
+                ctx.needs_rerender();
+            }
+        }
+        EditMoveLineDown => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().move_selected_lines(MoveLineDirection::Down);
+                ctx.needs_rerender();
+            }
+        }
         EditToggleLineComment => {
             if let Some(doc) = state.documents.active() {
                 doc.buffer.borrow_mut().toggle_line_comment();
@@ -326,6 +384,60 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
                 ctx.needs_rerender();
             }
         }
+        EditEncodeBase64 => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().encode_base64();
+                ctx.needs_rerender();
+            }
+        }
+        EditDecodeBase64 => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().decode_base64();
+                ctx.needs_rerender();
+            }
+        }
+        EditEncodeUrl => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().encode_url();
+                ctx.needs_rerender();
+            }
+        }
+        EditDecodeUrl => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().decode_url();
+                ctx.needs_rerender();
+            }
+        }
+        EditEncodeHex => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().encode_hex();
+                ctx.needs_rerender();
+            }
+        }
+        EditDecodeHex => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().decode_hex();
+                ctx.needs_rerender();
+            }
+        }
+        EditConvertUppercase => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().convert_to_uppercase();
+                ctx.needs_rerender();
+            }
+        }
+        EditConvertLowercase => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().convert_to_lowercase();
+                ctx.needs_rerender();
+            }
+        }
+        EditConvertTitleCase => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().convert_to_title_case();
+                ctx.needs_rerender();
+            }
+        }
         FindInFiles => {
             state.wants_find_in_files = true;
             state.ensure_find_in_files_root();
@@ -335,6 +447,14 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
                 let mut tb = doc.buffer.borrow_mut();
                 let word_wrap = tb.is_word_wrap_enabled();
                 tb.set_word_wrap(!word_wrap);
+                ctx.needs_rerender();
+            }
+        }
+        ViewShowWhitespace => {
+            if let Some(doc) = state.documents.active() {
+                let mut tb = doc.buffer.borrow_mut();
+                let show = tb.is_show_whitespace_enabled();
+                tb.set_show_whitespace(!show);
                 ctx.needs_rerender();
             }
         }
@@ -456,17 +576,29 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         | CommandId::EditFind
         | CommandId::EditReplace
         | CommandId::EditSelectAll
+        | CommandId::EditSelectLine
         | CommandId::EditDuplicateLine
         | CommandId::EditDeleteLine
         | CommandId::EditJoinLines
         | CommandId::EditSortLinesAsc
         | CommandId::EditSortLinesDesc
         | CommandId::EditTrimWhitespace
+        | CommandId::EditMoveLineUp
+        | CommandId::EditMoveLineDown
         | CommandId::EditToggleLineComment
         | CommandId::EditToggleBlockComment
         | CommandId::EditGotoMatchingBracket
+        | CommandId::EditEncodeBase64
+        | CommandId::EditDecodeBase64
+        | CommandId::EditEncodeUrl
+        | CommandId::EditDecodeUrl
+        | CommandId::EditEncodeHex
+        | CommandId::EditDecodeHex
+        | CommandId::EditConvertUppercase
+        | CommandId::EditConvertLowercase
+        | CommandId::EditConvertTitleCase
         | CommandId::FindInFiles => Edit,
-        CommandId::ViewWordWrap | CommandId::ViewGoToFile | CommandId::FileGoto => View,
+        CommandId::ViewWordWrap | CommandId::ViewShowWhitespace | CommandId::ViewGoToFile | CommandId::FileGoto => View,
         CommandId::HelpAbout | CommandId::HelpContext | CommandId::HelpQuickStart => Help,
         CommandId::ThemePicker
         | CommandId::SettingsThemeCycle

@@ -431,12 +431,18 @@ fn draw(ctx: &mut Context, state: &mut State) {
             commands::run_command(ctx, state, commands::CommandId::EditReplace);
         } else if key == state.keybindings.shortcut(commands::CommandId::FindInFiles) {
             commands::run_command(ctx, state, commands::CommandId::FindInFiles);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditSelectLine) {
+            commands::run_command(ctx, state, commands::CommandId::EditSelectLine);
         } else if key == state.keybindings.shortcut(commands::CommandId::EditDuplicateLine) {
             commands::run_command(ctx, state, commands::CommandId::EditDuplicateLine);
         } else if key == state.keybindings.shortcut(commands::CommandId::EditDeleteLine) {
             commands::run_command(ctx, state, commands::CommandId::EditDeleteLine);
         } else if key == state.keybindings.shortcut(commands::CommandId::EditJoinLines) {
             commands::run_command(ctx, state, commands::CommandId::EditJoinLines);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditMoveLineUp) {
+            commands::run_command(ctx, state, commands::CommandId::EditMoveLineUp);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditMoveLineDown) {
+            commands::run_command(ctx, state, commands::CommandId::EditMoveLineDown);
         } else if key == state.keybindings.shortcut(commands::CommandId::EditGotoMatchingBracket) {
             commands::run_command(ctx, state, commands::CommandId::EditGotoMatchingBracket);
         } else if key == state.keybindings.shortcut(commands::CommandId::CommandPalette) {
@@ -449,6 +455,12 @@ fn draw(ctx: &mut Context, state: &mut State) {
             commands::run_command(ctx, state, commands::CommandId::SettingsOpenConfig);
         } else if key == state.keybindings.shortcut(commands::CommandId::SettingsReload) {
             commands::run_command(ctx, state, commands::CommandId::SettingsReload);
+        } else if key == state.keybindings.shortcut(commands::CommandId::ViewShowWhitespace) {
+            commands::run_command(ctx, state, commands::CommandId::ViewShowWhitespace);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditConvertUppercase) {
+            commands::run_command(ctx, state, commands::CommandId::EditConvertUppercase);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditConvertLowercase) {
+            commands::run_command(ctx, state, commands::CommandId::EditConvertLowercase);
         } else if key == vk::F3 {
             search_execute(ctx, state, SearchAction::Search);
         } else {

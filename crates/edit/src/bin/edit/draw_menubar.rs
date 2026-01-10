@@ -305,6 +305,16 @@ fn draw_menu_view(ctx: &mut Context, state: &mut State) {
                 tb.set_word_wrap(!word_wrap);
                 ctx.needs_rerender();
             }
+            let show_whitespace = tb.is_show_whitespace_enabled();
+            if ctx.menubar_menu_checkbox(
+                "Show Whitespace",
+                'P',
+                state.keybindings.shortcut(commands::CommandId::ViewShowWhitespace),
+                show_whitespace,
+            ) {
+                tb.set_show_whitespace(!show_whitespace);
+                ctx.needs_rerender();
+            }
         }
         if ctx.menubar_menu_checkbox(
             "High Contrast",
