@@ -324,6 +324,18 @@ fn print_version() {
 }
 
 fn draw(ctx: &mut Context, state: &mut State) {
+    // Handle ESC to exit at top level BEFORE any TUI widgets consume it.
+    // Must be checked first because textarea and focus navigation consume ESC.
+    if state.settings.escape_to_exit
+        && ctx.keyboard_input() == Some(vk::ESCAPE)
+        && is_at_top_level(state)
+    {
+        state.wants_exit = true;
+        ctx.set_input_consumed();
+        ctx.needs_rerender();
+        return;
+    }
+
     draw_menubar(ctx, state);
     draw_editor(ctx, state);
     draw_statusbar(ctx, state);
@@ -431,6 +443,29 @@ fn draw(ctx: &mut Context, state: &mut State) {
         ctx.needs_rerender();
         ctx.set_input_consumed();
     }
+}
+
+/// Returns true if no dialogs, modals, or overlays are open.
+fn is_at_top_level(state: &State) -> bool {
+    !state.wants_close
+        && !state.wants_exit
+        && !state.wants_goto
+        && state.wants_file_picker == StateFilePicker::None
+        && !state.wants_save
+        && state.wants_encoding_change == StateEncodingChange::None
+        && !state.wants_go_to_file
+        && !state.wants_find_in_files
+        && !state.wants_command_palette
+        && !state.wants_quick_switcher
+        && !state.wants_theme_picker
+        && !state.wants_keybinding_editor
+        && !state.wants_about
+        && !state.wants_context_help
+        && !state.wants_quick_start
+        && !state.wants_binary_prompt
+        && !state.wants_replace_preview
+        && state.error_log_count == 0
+        && state.wants_search.kind == StateSearchKind::Hidden
 }
 
 fn draw_handle_wants_exit(_ctx: &mut Context, state: &mut State) {

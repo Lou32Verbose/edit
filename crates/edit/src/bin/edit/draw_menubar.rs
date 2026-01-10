@@ -234,6 +234,15 @@ fn draw_menu_view(ctx: &mut Context, state: &mut State) {
             state.needs_theme_refresh = true;
             ctx.needs_rerender();
         }
+        if ctx.menubar_menu_checkbox(
+            "Escape to Exit",
+            'X',
+            vk::NULL,
+            state.settings.escape_to_exit,
+        ) {
+            state.settings.escape_to_exit = !state.settings.escape_to_exit;
+            ctx.needs_rerender();
+        }
         if ctx.menubar_menu_button(
             "Edit Keybindings",
             'K',

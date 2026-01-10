@@ -77,6 +77,7 @@ pub struct EditorSettings {
     pub tab_size: CoordType,
     pub indent_with_tabs: bool,
     pub high_contrast: bool,
+    pub escape_to_exit: bool,
     pub theme: ThemeId,
     pub custom_theme: Option<[StraightRgba; framebuffer::INDEXED_COLORS_COUNT]>,
     pub large_file_threshold_bytes: u64,
@@ -89,6 +90,7 @@ impl Default for EditorSettings {
             tab_size: 4,
             indent_with_tabs: false,
             high_contrast: false,
+            escape_to_exit: true,
             theme: ThemeId::default(),
             custom_theme: None,
             large_file_threshold_bytes: 8 * 1024 * 1024,
@@ -477,6 +479,7 @@ fn default_config_text() -> &'static str {
         "# editor.tab_size = 4\n",
         "# editor.indent_with_tabs = false\n",
         "# editor.high_contrast = false\n",
+        "# editor.escape_to_exit = true\n",
         "# editor.theme = terminal  # terminal, nord, one-dark, gruvbox, monokai, solarized-dark, solarized-light, dracula, tokyo-night, midnight, paperwhite, custom\n",
         "# editor.large_file_threshold_bytes = 8388608\n",
         "# theme.custom.palette = #000000,#ff0000,#00ff00,#ffff00,#0000ff,#ff00ff,#00ffff,#ffffff,#555555,#ff5555,#55ff55,#ffff55,#5555ff,#ff55ff,#55ffff,#ffffff,#000000,#ffffff\n",
@@ -531,6 +534,11 @@ fn apply_config_kv(cfg: &mut Config, key: &str, value: &str) {
         "editor.high_contrast" => {
             if let Some(v) = parse_bool(value) {
                 cfg.editor.high_contrast = v;
+            }
+        }
+        "editor.escape_to_exit" => {
+            if let Some(v) = parse_bool(value) {
+                cfg.editor.escape_to_exit = v;
             }
         }
         "editor.theme" => {
