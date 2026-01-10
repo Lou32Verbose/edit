@@ -1,0 +1,12 @@
+[package]
+name = "my-app"
+version = "1.0.0"
+
+[[dependencies]]
+name = "serde"
+version = "1.0"
+
+# This is a comment
+[settings]
+enabled = true
+debug = false

@@ -37,6 +37,15 @@ pub enum CommandId {
     EditFind,
     EditReplace,
     EditSelectAll,
+    EditDuplicateLine,
+    EditDeleteLine,
+    EditJoinLines,
+    EditSortLinesAsc,
+    EditSortLinesDesc,
+    EditTrimWhitespace,
+    EditToggleLineComment,
+    EditToggleBlockComment,
+    EditGotoMatchingBracket,
     FindInFiles,
     ViewWordWrap,
     ViewGoToFile,
@@ -94,6 +103,15 @@ pub fn command_list() -> Vec<Command> {
         Command { id: EditFind, label: loc(LocId::EditFind), requires_document: true, show_in_palette: true },
         Command { id: EditReplace, label: loc(LocId::EditReplace), requires_document: true, show_in_palette: true },
         Command { id: EditSelectAll, label: loc(LocId::EditSelectAll), requires_document: true, show_in_palette: true },
+        Command { id: EditDuplicateLine, label: "Duplicate Line", requires_document: true, show_in_palette: true },
+        Command { id: EditDeleteLine, label: "Delete Line", requires_document: true, show_in_palette: true },
+        Command { id: EditJoinLines, label: "Join Lines", requires_document: true, show_in_palette: true },
+        Command { id: EditSortLinesAsc, label: "Sort Lines (Ascending)", requires_document: true, show_in_palette: true },
+        Command { id: EditSortLinesDesc, label: "Sort Lines (Descending)", requires_document: true, show_in_palette: true },
+        Command { id: EditTrimWhitespace, label: "Trim Trailing Whitespace", requires_document: true, show_in_palette: true },
+        Command { id: EditToggleLineComment, label: "Toggle Line Comment", requires_document: true, show_in_palette: true },
+        Command { id: EditToggleBlockComment, label: "Toggle Block Comment", requires_document: true, show_in_palette: true },
+        Command { id: EditGotoMatchingBracket, label: "Go to Matching Bracket", requires_document: true, show_in_palette: true },
         Command { id: FindInFiles, label: "Find in Files", requires_document: false, show_in_palette: true },
         Command { id: ViewWordWrap, label: loc(LocId::ViewWordWrap), requires_document: true, show_in_palette: true },
         Command { id: ViewGoToFile, label: loc(LocId::ViewGoToFile), requires_document: true, show_in_palette: true },
@@ -143,6 +161,15 @@ pub fn shortcut(id: CommandId) -> InputKey {
         EditFind => kbmod::CTRL | vk::F,
         EditReplace => kbmod::CTRL | vk::R,
         EditSelectAll => kbmod::CTRL | vk::A,
+        EditDuplicateLine => kbmod::CTRL | vk::D,
+        EditDeleteLine => kbmod::CTRL_SHIFT | vk::K,
+        EditJoinLines => kbmod::CTRL | vk::J,
+        EditSortLinesAsc => vk::NULL,
+        EditSortLinesDesc => vk::NULL,
+        EditTrimWhitespace => vk::NULL,
+        EditToggleLineComment => vk::NULL, // TODO: Need special handling for Ctrl+/
+        EditToggleBlockComment => vk::NULL, // TODO: Need special handling for Ctrl+Shift+/
+        EditGotoMatchingBracket => kbmod::CTRL | vk::M, // Ctrl+M (common alternative)
         FindInFiles => vk::F4,
         ViewWordWrap => kbmod::ALT | vk::Z,
         ViewGoToFile => kbmod::CTRL | vk::P,
@@ -235,6 +262,60 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
         EditSelectAll => {
             if let Some(doc) = state.documents.active() {
                 doc.buffer.borrow_mut().select_all();
+                ctx.needs_rerender();
+            }
+        }
+        EditDuplicateLine => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().duplicate_lines();
+                ctx.needs_rerender();
+            }
+        }
+        EditDeleteLine => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().delete_current_line();
+                ctx.needs_rerender();
+            }
+        }
+        EditJoinLines => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().join_lines();
+                ctx.needs_rerender();
+            }
+        }
+        EditSortLinesAsc => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().sort_lines(false);
+                ctx.needs_rerender();
+            }
+        }
+        EditSortLinesDesc => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().sort_lines(true);
+                ctx.needs_rerender();
+            }
+        }
+        EditTrimWhitespace => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().trim_trailing_whitespace();
+                ctx.needs_rerender();
+            }
+        }
+        EditToggleLineComment => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().toggle_line_comment();
+                ctx.needs_rerender();
+            }
+        }
+        EditToggleBlockComment => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().toggle_block_comment();
+                ctx.needs_rerender();
+            }
+        }
+        EditGotoMatchingBracket => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().goto_matching_bracket();
                 ctx.needs_rerender();
             }
         }
@@ -367,6 +448,15 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         | CommandId::EditFind
         | CommandId::EditReplace
         | CommandId::EditSelectAll
+        | CommandId::EditDuplicateLine
+        | CommandId::EditDeleteLine
+        | CommandId::EditJoinLines
+        | CommandId::EditSortLinesAsc
+        | CommandId::EditSortLinesDesc
+        | CommandId::EditTrimWhitespace
+        | CommandId::EditToggleLineComment
+        | CommandId::EditToggleBlockComment
+        | CommandId::EditGotoMatchingBracket
         | CommandId::FindInFiles => Edit,
         CommandId::ViewWordWrap | CommandId::ViewGoToFile | CommandId::FileGoto => View,
         CommandId::HelpAbout | CommandId::HelpContext | CommandId::HelpQuickStart => Help,

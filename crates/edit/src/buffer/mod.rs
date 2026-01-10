@@ -133,6 +133,8 @@ enum HighlightKind {
     Number,
     Keyword,
     CsvColumn(u8),
+    Section,
+    Key,
 }
 
 struct HighlightSpan {
@@ -1855,6 +1857,11 @@ impl TextBuffer {
             Some(TextBufferSelection { beg, end }) => minmax(beg, end),
         };
 
+        // Find matching bracket for highlighting (if cursor is on a bracket)
+        let matching_bracket_offset = if focused { self.find_matching_bracket_offset() } else { None };
+        // Also highlight the bracket under cursor if there's a match
+        let cursor_bracket_offset = if matching_bracket_offset.is_some() { Some(self.cursor.offset) } else { None };
+
         line.reserve(width as usize * 2);
 
         for y in 0..height {
@@ -2146,8 +2153,44 @@ impl TextBuffer {
                                 ];
                                 fb.indexed(CSV_COLORS[(col % 8) as usize])
                             }
+                            HighlightKind::Section => fb.indexed(IndexedColor::BrightYellow),
+                            HighlightKind::Key => fb.indexed(IndexedColor::BrightCyan),
                         };
                         fb.blend_fg(Rect { left, top, right, bottom: top + 1 }, color);
+                    }
+                }
+            }
+
+            // Highlight matching bracket pair if on this line
+            for bracket_off in [matching_bracket_offset, cursor_bracket_offset].into_iter().flatten() {
+                if bracket_off >= cursor_beg.offset && bracket_off < cursor_end.offset {
+                    // Calculate visual column for the bracket
+                    let content = line.get(content_byte_start..).unwrap_or("");
+                    let offset_in_line = bracket_off - cursor_beg.offset;
+
+                    // Count columns from start of content to the bracket position
+                    let mut col: CoordType = 0;
+                    let mut byte_pos = 0;
+                    for ch in content.chars() {
+                        if byte_pos >= offset_in_line {
+                            break;
+                        }
+                        byte_pos += ch.len_utf8();
+                        col += if ch == '\t' {
+                            self.tab_size - (col % self.tab_size)
+                        } else {
+                            1
+                        };
+                    }
+
+                    let left = destination.left + self.margin_width + col;
+                    let top = destination.top + y;
+                    if left < destination.right {
+                        // Highlight with a visible background color
+                        fb.blend_bg(
+                            Rect { left, top, right: left + 1, bottom: top + 1 },
+                            fb.indexed_alpha(IndexedColor::BrightYellow, 1, 2),
+                        );
                     }
                 }
             }
@@ -2652,6 +2695,467 @@ impl TextBuffer {
         }));
     }
 
+    /// Duplicates the current line or selected lines.
+    pub fn duplicate_lines(&mut self) {
+        let cursor = self.cursor;
+
+        // Get the line range to duplicate
+        let [beg_y, end_y] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [cursor.logical_pos.y, cursor.logical_pos.y],
+        };
+
+        // Move to start of first line and get the content
+        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+
+        // Extract the lines
+        let mut content = Vec::new();
+        self.buffer.extract_raw(start_cursor.offset..end_cursor.offset, &mut content, 0);
+
+        // Ensure content ends with newline
+        if !content.ends_with(b"\n") {
+            content.extend_from_slice(if self.newlines_are_crlf { b"\r\n" } else { b"\n" });
+        }
+
+        // Insert at end of last line
+        self.cursor_move_to_logical(Point { x: 0, y: end_y + 1 });
+        self.edit_begin(HistoryType::Write, self.cursor);
+        self.write_raw(&content);
+        self.edit_end();
+
+        // Move cursor down to the duplicated content
+        self.cursor_move_to_logical(Point {
+            x: cursor.logical_pos.x,
+            y: cursor.logical_pos.y + (end_y - beg_y + 1),
+        });
+    }
+
+    /// Deletes the current line entirely.
+    pub fn delete_current_line(&mut self) {
+        let y = self.cursor.logical_pos.y;
+
+        // Select the entire line
+        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
+        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: y + 1 });
+
+        if start_cursor.offset < end_cursor.offset {
+            self.edit_begin(HistoryType::Delete, start_cursor);
+            self.edit_delete(end_cursor);
+            self.edit_end();
+        }
+
+        // Stay at beginning of line
+        self.cursor_move_to_logical(Point { x: 0, y });
+    }
+
+    /// Joins the current line with the next line (or joins all selected lines).
+    pub fn join_lines(&mut self) {
+        let cursor = self.cursor;
+
+        // Get the line range
+        let [beg_y, end_y] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [cursor.logical_pos.y, cursor.logical_pos.y + 1],
+        };
+
+        // Can't join if there's only one line or we're at the last line
+        if end_y <= beg_y || beg_y >= self.stats.logical_lines - 1 {
+            return;
+        }
+
+        self.edit_begin_grouping();
+
+        // Work from end to beginning to avoid offset issues
+        for y in (beg_y..end_y).rev() {
+            // Find the end of line y (position before newline)
+            let line_end = self.cursor_move_to_logical_internal(
+                self.cursor,
+                Point { x: CoordType::MAX, y },
+            );
+
+            // Find start of next line
+            let next_line_start = self.cursor_move_to_logical_internal(
+                line_end,
+                Point { x: 0, y: y + 1 },
+            );
+
+            // Delete newline and leading whitespace, replace with single space
+            if line_end.offset < next_line_start.offset {
+                // First, find where whitespace ends on the next line
+                let mut ws_end = next_line_start;
+                let text = self.buffer.read_forward(next_line_start.offset);
+                let mut ws_len = 0;
+                for &b in text {
+                    if b == b' ' || b == b'\t' {
+                        ws_len += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                ws_end.offset += ws_len;
+
+                self.cursor_move_to_offset(line_end.offset);
+                self.edit_begin(HistoryType::Delete, self.cursor);
+                self.edit_delete(ws_end);
+                self.edit_end();
+
+                // Insert single space
+                self.edit_begin(HistoryType::Write, self.cursor);
+                self.write_raw(b" ");
+                self.edit_end();
+            }
+        }
+
+        self.edit_end_grouping();
+        self.set_selection(None);
+    }
+
+    /// Sorts the selected lines (or all lines if no selection) alphabetically.
+    pub fn sort_lines(&mut self, descending: bool) {
+        let cursor = self.cursor;
+
+        // Get the line range
+        let [beg_y, end_y] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [0, self.stats.logical_lines - 1],
+        };
+
+        if end_y <= beg_y {
+            return;
+        }
+
+        // Get offsets for the lines
+        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+
+        // Extract the content
+        let mut content = Vec::new();
+        self.buffer.extract_raw(start_cursor.offset..end_cursor.offset, &mut content, 0);
+
+        // Split into lines and sort
+        let content_str = String::from_utf8_lossy(&content);
+        let mut lines: Vec<&str> = content_str.lines().collect();
+
+        if descending {
+            lines.sort_by(|a, b| b.cmp(a));
+        } else {
+            lines.sort();
+        }
+
+        // Rejoin with newlines
+        let newline = if self.newlines_are_crlf { "\r\n" } else { "\n" };
+        let mut sorted = lines.join(newline);
+        sorted.push_str(newline);
+
+        // Replace the content
+        self.edit_begin_grouping();
+
+        self.cursor_move_to_offset(start_cursor.offset);
+        self.edit_begin(HistoryType::Delete, self.cursor);
+        self.edit_delete(end_cursor);
+        self.edit_end();
+
+        self.edit_begin(HistoryType::Write, self.cursor);
+        self.write_raw(sorted.as_bytes());
+        self.edit_end();
+
+        self.edit_end_grouping();
+
+        // Restore cursor position
+        self.cursor_move_to_logical(cursor.logical_pos);
+        self.set_selection(None);
+    }
+
+    /// Trims trailing whitespace from all lines.
+    pub fn trim_trailing_whitespace(&mut self) {
+        self.edit_begin_grouping();
+
+        // Work backwards from last line to first
+        for y in (0..self.stats.logical_lines).rev() {
+            // Find end of line content (before any trailing whitespace)
+            let line_start = self.cursor_move_to_logical_internal(
+                self.cursor,
+                Point { x: 0, y },
+            );
+            let line_end = self.cursor_move_to_logical_internal(
+                line_start,
+                Point { x: CoordType::MAX, y },
+            );
+
+            // Read backwards from line_end to find trailing whitespace
+            if line_start.offset >= line_end.offset {
+                continue;
+            }
+
+            let mut content = Vec::new();
+            self.buffer.extract_raw(line_start.offset..line_end.offset, &mut content, 0);
+
+            // Find where trailing whitespace starts
+            let trimmed_len = content.iter().rposition(|&b| b != b' ' && b != b'\t').map(|i| i + 1).unwrap_or(0);
+
+            if trimmed_len < content.len() {
+                // There's trailing whitespace to remove
+                let ws_start_offset = line_start.offset + trimmed_len;
+
+                self.cursor_move_to_offset(ws_start_offset);
+                self.edit_begin(HistoryType::Delete, self.cursor);
+                self.edit_delete(line_end);
+                self.edit_end();
+            }
+        }
+
+        self.edit_end_grouping();
+    }
+
+    /// Gets the line comment prefix for the current language.
+    fn line_comment_prefix(&self) -> Option<&'static str> {
+        match self.language {
+            Language::Rust | Language::C | Language::Cpp | Language::CSharp
+            | Language::Go | Language::Java | Language::JavaScript
+            | Language::TypeScript | Language::Swift | Language::Kotlin
+            | Language::Dart | Language::Scala => Some("//"),
+            Language::Python | Language::Ruby | Language::Shell
+            | Language::Yaml | Language::Toml | Language::Ini
+            | Language::R | Language::Perl => Some("#"),
+            Language::Sql | Language::Lua | Language::Haskell => Some("--"),
+            Language::Latex => Some("%"),
+            Language::Clojure => Some(";"),
+            Language::VbNet => Some("'"),
+            _ => None,
+        }
+    }
+
+    /// Gets the block comment delimiters for the current language.
+    fn block_comment_delimiters(&self) -> Option<(&'static str, &'static str)> {
+        match self.language {
+            Language::C | Language::Cpp | Language::CSharp | Language::Java
+            | Language::JavaScript | Language::TypeScript | Language::Go
+            | Language::Rust | Language::Swift | Language::Kotlin | Language::Css
+            | Language::Dart | Language::Scala | Language::Php => Some(("/*", "*/")),
+            Language::Html | Language::Xml => Some(("<!--", "-->")),
+            Language::Lua => Some(("--[[", "]]")),
+            Language::Haskell => Some(("{-", "-}")),
+            _ => None,
+        }
+    }
+
+    /// Toggles line comments on the current line or selection.
+    pub fn toggle_line_comment(&mut self) {
+        let Some(prefix) = self.line_comment_prefix() else {
+            return;
+        };
+
+        let cursor = self.cursor;
+        let prefix_bytes = prefix.as_bytes();
+        let prefix_len = prefix_bytes.len();
+
+        // Get the line range
+        let [beg_y, end_y] = match self.selection {
+            Some(s) => minmax(s.beg.y, s.end.y),
+            None => [cursor.logical_pos.y, cursor.logical_pos.y],
+        };
+
+        // Check if all lines are already commented
+        let mut all_commented = true;
+        for y in beg_y..=end_y {
+            let line_start = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
+            let line_end = self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
+
+            let mut content = Vec::new();
+            self.buffer.extract_raw(line_start.offset..line_end.offset, &mut content, 0);
+
+            // Skip leading whitespace
+            let trimmed = content.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(content.len());
+            if !content[trimmed..].starts_with(prefix_bytes) {
+                all_commented = false;
+                break;
+            }
+        }
+
+        self.edit_begin_grouping();
+
+        // Process lines in reverse order to preserve offsets
+        for y in (beg_y..=end_y).rev() {
+            let line_start = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
+            let line_end = self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
+
+            let mut content = Vec::new();
+            self.buffer.extract_raw(line_start.offset..line_end.offset, &mut content, 0);
+
+            let ws_len = content.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(content.len());
+
+            if all_commented {
+                // Remove comment prefix (and optional space after it)
+                let remove_start = line_start.offset + ws_len;
+                let mut remove_end = remove_start + prefix_len;
+
+                // Check if there's a space after the prefix to remove
+                if content.get(ws_len + prefix_len) == Some(&b' ') {
+                    remove_end += 1;
+                }
+
+                let remove_end_cursor = Cursor {
+                    offset: remove_end,
+                    logical_pos: Point { x: (remove_end - line_start.offset) as CoordType, y },
+                    visual_pos: Point::default(),
+                    column: 0,
+                    wrap_opp: false,
+                };
+
+                self.cursor_move_to_offset(remove_start);
+                self.edit_begin(HistoryType::Delete, self.cursor);
+                self.edit_delete(remove_end_cursor);
+                self.edit_end();
+            } else {
+                // Add comment prefix at start of content (after whitespace)
+                let insert_offset = line_start.offset + ws_len;
+                self.cursor_move_to_offset(insert_offset);
+                self.edit_begin(HistoryType::Write, self.cursor);
+                self.write_raw(prefix_bytes);
+                self.write_raw(b" ");
+                self.edit_end();
+            }
+        }
+
+        self.edit_end_grouping();
+        self.cursor_move_to_logical(cursor.logical_pos);
+    }
+
+    /// Toggles block comment around the selection.
+    pub fn toggle_block_comment(&mut self) {
+        let Some((open, close)) = self.block_comment_delimiters() else {
+            return;
+        };
+
+        let Some((beg, end)) = self.selection_range() else {
+            return; // Need a selection for block comment
+        };
+
+        let open_bytes = open.as_bytes();
+        let close_bytes = close.as_bytes();
+
+        // Extract selected content
+        let mut content = Vec::new();
+        self.buffer.extract_raw(beg.offset..end.offset, &mut content, 0);
+
+        // Check if already wrapped in block comment
+        let already_wrapped = content.starts_with(open_bytes) && content.ends_with(close_bytes);
+
+        self.edit_begin_grouping();
+
+        if already_wrapped {
+            // Remove block comment delimiters
+            // Remove closing delimiter first (working backwards)
+            let close_start = end.offset - close_bytes.len();
+
+            self.cursor_move_to_offset(close_start);
+            self.edit_begin(HistoryType::Delete, self.cursor);
+            self.edit_delete(end);
+            self.edit_end();
+
+            // Remove opening delimiter
+            self.cursor_move_to_offset(beg.offset);
+            let open_end = Cursor {
+                offset: beg.offset + open_bytes.len(),
+                logical_pos: Point::default(),
+                visual_pos: Point::default(),
+                column: 0,
+                wrap_opp: false,
+            };
+            self.edit_begin(HistoryType::Delete, self.cursor);
+            self.edit_delete(open_end);
+            self.edit_end();
+        } else {
+            // Add block comment delimiters
+            // Add closing delimiter first
+            self.cursor_move_to_offset(end.offset);
+            self.edit_begin(HistoryType::Write, self.cursor);
+            self.write_raw(close_bytes);
+            self.edit_end();
+
+            // Add opening delimiter
+            self.cursor_move_to_offset(beg.offset);
+            self.edit_begin(HistoryType::Write, self.cursor);
+            self.write_raw(open_bytes);
+            self.edit_end();
+        }
+
+        self.edit_end_grouping();
+        self.set_selection(None);
+    }
+
+    /// Finds the offset of the matching bracket, if the cursor is on a bracket.
+    /// Returns None if not on a bracket or no match found.
+    fn find_matching_bracket_offset(&self) -> Option<usize> {
+        let offset = self.cursor.offset;
+        let text = self.buffer.read_forward(offset);
+
+        if text.is_empty() {
+            return None;
+        }
+
+        let ch = text[0];
+        let (target, forward) = match ch {
+            b'(' => (b')', true),
+            b')' => (b'(', false),
+            b'[' => (b']', true),
+            b']' => (b'[', false),
+            b'{' => (b'}', true),
+            b'}' => (b'{', false),
+            _ => return None, // Not on a bracket (excluding < > as they're often comparison operators)
+        };
+
+        let mut depth = 1i32;
+
+        if forward {
+            // Search forward
+            for (i, &b) in text[1..].iter().enumerate() {
+                if b == ch {
+                    depth += 1;
+                } else if b == target {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(offset + i + 1);
+                    }
+                }
+            }
+        } else {
+            // Search backward
+            if offset == 0 {
+                return None;
+            }
+
+            let mut search_offset = offset;
+            while search_offset > 0 {
+                search_offset -= 1;
+                let prev_text = self.buffer.read_forward(search_offset);
+                if prev_text.is_empty() {
+                    break;
+                }
+                let b = prev_text[0];
+                if b == ch {
+                    depth += 1;
+                } else if b == target {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(search_offset);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Moves the cursor to the matching bracket.
+    pub fn goto_matching_bracket(&mut self) {
+        if let Some(match_offset) = self.find_matching_bracket_offset() {
+            self.cursor_move_to_offset(match_offset);
+        }
+    }
+
     /// Extracts the contents of the current selection.
     /// May optionally delete it, if requested. This is meant to be used for Ctrl+X.
     fn extract_selection(&mut self, delete: bool) -> Vec<u8> {
@@ -3098,6 +3602,279 @@ impl TextBuffer {
                     });
                 }
             }
+            Language::Ini => {
+                let trimmed = line.trim_start();
+                let indent = line.len() - trimmed.len();
+
+                // Section header: [section_name]
+                if trimmed.starts_with('[') {
+                    if let Some(end) = trimmed.find(']') {
+                        spans.push(HighlightSpan {
+                            start: indent,
+                            end: indent + end + 1,
+                            kind: HighlightKind::Section,
+                        });
+                        return spans;
+                    }
+                }
+
+                // Comment (# or ;)
+                let comment_start = trimmed
+                    .find('#')
+                    .or_else(|| trimmed.find(';'))
+                    .map(|p| indent + p);
+
+                if let Some(cs) = comment_start {
+                    spans.push(HighlightSpan {
+                        start: cs,
+                        end: line.len(),
+                        kind: HighlightKind::Comment,
+                    });
+                }
+
+                // Key = value
+                let line_end = comment_start.unwrap_or(line.len());
+                if let Some(eq_pos) = line[..line_end].find('=') {
+                    let key_part = &line[indent..eq_pos];
+                    let key_end = indent + key_part.trim_end().len();
+                    if key_end > indent {
+                        spans.push(HighlightSpan {
+                            start: indent,
+                            end: key_end,
+                            kind: HighlightKind::Key,
+                        });
+                    }
+
+                    // Check for strings in value
+                    let value_start = eq_pos + 1;
+                    let value_part = &line[value_start..line_end];
+                    for range in Self::scan_strings(value_part, '"') {
+                        spans.push(HighlightSpan {
+                            start: value_start + range.start,
+                            end: value_start + range.end,
+                            kind: HighlightKind::String,
+                        });
+                    }
+
+                    // Check for keywords in value
+                    let value_trimmed = value_part.trim();
+                    let value_lower = value_trimmed.to_ascii_lowercase();
+                    if matches!(value_lower.as_str(), "true" | "false" | "on" | "off" | "yes" | "no") {
+                        let kw_start = value_start + value_part.find(value_trimmed).unwrap_or(0);
+                        spans.push(HighlightSpan {
+                            start: kw_start,
+                            end: kw_start + value_trimmed.len(),
+                            kind: HighlightKind::Keyword,
+                        });
+                    }
+                }
+            }
+            Language::Toml => {
+                let trimmed = line.trim_start();
+                let indent = line.len() - trimmed.len();
+
+                // Table header: [table] or [[array]]
+                if trimmed.starts_with('[') {
+                    if let Some(end) = trimmed.rfind(']') {
+                        spans.push(HighlightSpan {
+                            start: indent,
+                            end: indent + end + 1,
+                            kind: HighlightKind::Section,
+                        });
+                        return spans;
+                    }
+                }
+
+                // Comment
+                let comment_start = Self::find_comment_start(line, "#", &[]);
+                if let Some(cs) = comment_start {
+                    spans.push(HighlightSpan {
+                        start: cs,
+                        end: line.len(),
+                        kind: HighlightKind::Comment,
+                    });
+                }
+
+                // Key = value
+                let line_end = comment_start.unwrap_or(line.len());
+                if let Some(eq_pos) = line[..line_end].find('=') {
+                    let key_part = &line[indent..eq_pos];
+                    let key_end = indent + key_part.trim_end().len();
+                    if key_end > indent {
+                        spans.push(HighlightSpan {
+                            start: indent,
+                            end: key_end,
+                            kind: HighlightKind::Key,
+                        });
+                    }
+
+                    // Check for strings in value
+                    let value_start = eq_pos + 1;
+                    let value_part = &line[value_start..line_end];
+                    let mut string_ranges = Self::scan_strings(value_part, '"');
+                    string_ranges.extend(Self::scan_strings(value_part, '\''));
+                    for range in string_ranges {
+                        spans.push(HighlightSpan {
+                            start: value_start + range.start,
+                            end: value_start + range.end,
+                            kind: HighlightKind::String,
+                        });
+                    }
+
+                    // Check for keywords in value
+                    let value_trimmed = value_part.trim();
+                    if matches!(value_trimmed, "true" | "false") {
+                        let kw_start = value_start + value_part.find(value_trimmed).unwrap_or(0);
+                        spans.push(HighlightSpan {
+                            start: kw_start,
+                            end: kw_start + value_trimmed.len(),
+                            kind: HighlightKind::Keyword,
+                        });
+                    }
+                }
+            }
+            Language::Yaml => {
+                let trimmed = line.trim_start();
+                let indent = line.len() - trimmed.len();
+
+                // Comment
+                let comment_start = Self::find_comment_start(line, "#", &[]);
+                if let Some(cs) = comment_start {
+                    spans.push(HighlightSpan {
+                        start: cs,
+                        end: line.len(),
+                        kind: HighlightKind::Comment,
+                    });
+                }
+
+                let line_end = comment_start.unwrap_or(line.len());
+                let working_line = &line[..line_end];
+
+                // Key: value (find first colon not inside quotes)
+                let mut in_quotes = false;
+                let mut quote_char = '"';
+                let mut colon_pos = None;
+
+                for (i, ch) in working_line.char_indices() {
+                    if !in_quotes && (ch == '"' || ch == '\'') {
+                        in_quotes = true;
+                        quote_char = ch;
+                    } else if in_quotes && ch == quote_char {
+                        in_quotes = false;
+                    } else if !in_quotes && ch == ':' {
+                        colon_pos = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(cp) = colon_pos {
+                    // Key is from indent to colon
+                    let key_part = &line[indent..cp];
+                    if !key_part.trim().is_empty() && !key_part.starts_with('-') {
+                        spans.push(HighlightSpan {
+                            start: indent,
+                            end: cp,
+                            kind: HighlightKind::Key,
+                        });
+                    }
+
+                    // Check for strings and keywords in value
+                    let value_start = cp + 1;
+                    if value_start < line_end {
+                        let value_part = &line[value_start..line_end];
+                        let mut string_ranges = Self::scan_strings(value_part, '"');
+                        string_ranges.extend(Self::scan_strings(value_part, '\''));
+                        for range in string_ranges {
+                            spans.push(HighlightSpan {
+                                start: value_start + range.start,
+                                end: value_start + range.end,
+                                kind: HighlightKind::String,
+                            });
+                        }
+
+                        // Keywords
+                        let value_trimmed = value_part.trim();
+                        if matches!(value_trimmed, "true" | "false" | "null" | "~") {
+                            let kw_start = value_start + value_part.find(value_trimmed).unwrap_or(0);
+                            spans.push(HighlightSpan {
+                                start: kw_start,
+                                end: kw_start + value_trimmed.len(),
+                                kind: HighlightKind::Keyword,
+                            });
+                        }
+                    }
+                } else {
+                    // No colon - might be a list item or just a value
+                    let mut string_ranges = Self::scan_strings(working_line, '"');
+                    string_ranges.extend(Self::scan_strings(working_line, '\''));
+                    for range in string_ranges {
+                        spans.push(HighlightSpan {
+                            start: range.start,
+                            end: range.end,
+                            kind: HighlightKind::String,
+                        });
+                    }
+                }
+            }
+            Language::Json => {
+                // Scan all strings first
+                let string_ranges = Self::scan_strings(line, '"');
+
+                // Check each string - if followed by `:`, it's a key
+                for range in &string_ranges {
+                    let after = line[range.end..].trim_start();
+                    if after.starts_with(':') {
+                        spans.push(HighlightSpan {
+                            start: range.start,
+                            end: range.end,
+                            kind: HighlightKind::Key,
+                        });
+                    } else {
+                        spans.push(HighlightSpan {
+                            start: range.start,
+                            end: range.end,
+                            kind: HighlightKind::String,
+                        });
+                    }
+                }
+
+                // Keywords and numbers
+                let bytes = line.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    // Skip if inside a string
+                    if string_ranges.iter().any(|r| i >= r.start && i < r.end) {
+                        i += 1;
+                        continue;
+                    }
+
+                    // Check for keywords
+                    if line[i..].starts_with("true") {
+                        spans.push(HighlightSpan {
+                            start: i,
+                            end: i + 4,
+                            kind: HighlightKind::Keyword,
+                        });
+                        i += 4;
+                    } else if line[i..].starts_with("false") {
+                        spans.push(HighlightSpan {
+                            start: i,
+                            end: i + 5,
+                            kind: HighlightKind::Keyword,
+                        });
+                        i += 5;
+                    } else if line[i..].starts_with("null") {
+                        spans.push(HighlightSpan {
+                            start: i,
+                            end: i + 4,
+                            kind: HighlightKind::Keyword,
+                        });
+                        i += 4;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
             Language::Markdown | Language::Mdx => {
                 let trimmed = line.trim_start();
                 if trimmed.starts_with('#') {
@@ -3109,14 +3886,11 @@ impl TextBuffer {
                 }
             }
             Language::Rust
-            | Language::Toml
-            | Language::Json
             | Language::Python
             | Language::JavaScript
             | Language::TypeScript
             | Language::Html
             | Language::Css
-            | Language::Yaml
             | Language::Shell
             | Language::C
             | Language::Cpp
@@ -3128,7 +3902,6 @@ impl TextBuffer {
             | Language::Php
             | Language::Sql
             | Language::Xml
-            | Language::Ini
             | Language::Lua
             | Language::Makefile
             | Language::PowerShell
@@ -3151,14 +3924,14 @@ impl TextBuffer {
             | Language::Latex
             | Language::Graphql => {
                 let string_ranges = match language {
-                    Language::Rust | Language::Json => Self::scan_strings(line, '"'),
+                    Language::Rust => Self::scan_strings(line, '"'),
                     Language::Markdown | Language::Mdx => Vec::new(),
                     Language::Html => {
                         let mut ranges = Self::scan_strings(line, '"');
                         ranges.extend(Self::scan_strings(line, '\''));
                         ranges
                     }
-                    Language::Toml | Language::Python | Language::Yaml => {
+                    Language::Python => {
                         let mut ranges = Self::scan_strings(line, '"');
                         ranges.extend(Self::scan_strings(line, '\''));
                         ranges
@@ -3174,7 +3947,6 @@ impl TextBuffer {
                     Language::Shell
                     | Language::Ruby
                     | Language::Php
-                    | Language::Ini
                     | Language::Lua
                     | Language::Makefile
                     | Language::PowerShell
@@ -3213,9 +3985,7 @@ impl TextBuffer {
 
                 let comment_start = match language {
                     Language::Rust => Self::find_comment_start(line, "//", &string_ranges),
-                    Language::Toml => Self::find_comment_start(line, "#", &string_ranges),
                     Language::Python => Self::find_comment_start(line, "#", &string_ranges),
-                    Language::Yaml => Self::find_comment_start(line, "#", &string_ranges),
                     Language::JavaScript | Language::TypeScript => {
                         Self::find_comment_start(line, "//", &string_ranges)
                     }
@@ -3223,7 +3993,6 @@ impl TextBuffer {
                     Language::Html => Self::find_comment_start(line, "<!--", &string_ranges),
                     Language::Shell
                     | Language::Ruby
-                    | Language::Ini
                     | Language::Makefile
                     | Language::R
                     | Language::PowerShell => Self::find_comment_start(line, "#", &string_ranges),
@@ -3286,8 +4055,6 @@ impl TextBuffer {
                         "Self", "crate", "super", "const", "static", "ref", "as", "in", "where",
                         "async", "await",
                     ][..],
-                    Language::Json => &["true", "false", "null"][..],
-                    Language::Toml => &["true", "false"][..],
                     Language::Python => &[
                         "def", "class", "self", "return", "import", "from", "as", "if", "elif",
                         "else", "for", "while", "try", "except", "finally", "with", "lambda",
@@ -3310,7 +4077,6 @@ impl TextBuffer {
                         "font", "position", "absolute", "relative", "fixed", "border", "width",
                         "height", "gap",
                     ][..],
-                    Language::Yaml => &["true", "false", "null"][..],
                     Language::Shell => &[
                         "if", "then", "fi", "for", "do", "done", "case", "esac", "function", "in",
                     ][..],
@@ -3347,7 +4113,6 @@ impl TextBuffer {
                         "table", "into", "values", "and", "or", "null",
                     ][..],
                     Language::Xml => &["xml", "doctype"][..],
-                    Language::Ini => &["true", "false", "on", "off"][..],
                     Language::Lua => &[
                         "function", "local", "end", "if", "then", "elseif", "else", "for", "while",
                         "return", "true", "false", "nil",
