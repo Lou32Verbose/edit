@@ -178,7 +178,7 @@ pub fn shortcut(id: CommandId) -> InputKey {
         HelpContext => vk::NULL,
         HelpQuickStart => vk::NULL,
         CommandPalette => vk::F1,
-        ThemePicker => kbmod::CTRL_SHIFT | vk::T,
+        ThemePicker => vk::F12, // Changed from Ctrl+Shift+T to avoid Windows Terminal "New Tab" conflict
         QuickSwitcher => kbmod::CTRL | vk::E,
         SettingsOpenConfig => vk::NULL,
         SettingsReload => vk::NULL,
