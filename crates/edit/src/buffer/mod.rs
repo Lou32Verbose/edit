@@ -1957,8 +1957,6 @@ impl TextBuffer {
             // This differs from margin_width (visual columns) due to multi-byte UTF-8 chars in the margin.
             let content_byte_start = line.len();
 
-            let mut selection_off = 0..0;
-
             // Figure out the selection range on this line, if any.
             if cursor_beg.visual_pos.y == visual_line
                 && selection_beg <= cursor_end.logical_pos
@@ -1969,15 +1967,12 @@ impl TextBuffer {
                 // By default, we assume the entire line is selected.
                 let mut selection_pos_beg = 0;
                 let mut selection_pos_end = COORD_TYPE_SAFE_MAX;
-                selection_off.start = cursor_beg.offset;
-                selection_off.end = cursor_end.offset;
 
                 // The start of the selection is within this line. We need to update selection_beg.
                 if selection_beg <= cursor_end.logical_pos
                     && selection_beg >= cursor_beg.logical_pos
                 {
                     cursor = self.cursor_move_to_logical_internal(cursor, selection_beg);
-                    selection_off.start = cursor.offset;
                     selection_pos_beg = cursor.visual_pos.x;
                 }
 
@@ -1986,7 +1981,6 @@ impl TextBuffer {
                     && selection_end >= cursor_beg.logical_pos
                 {
                     cursor = self.cursor_move_to_logical_internal(cursor, selection_end);
-                    selection_off.end = cursor.offset;
                     selection_pos_end = cursor.visual_pos.x;
                 }
 
@@ -2049,7 +2043,7 @@ impl TextBuffer {
 
                         if ch == ' ' || ch == '\t' {
                             let is_tab = ch == '\t';
-                            let visualize = self.show_whitespace || selection_off.contains(&global_off);
+                            let visualize = self.show_whitespace;
                             let mut whitespace = TAB_WHITESPACE;
                             let mut prefix_add = 0;
 
