@@ -3168,6 +3168,65 @@ impl<'a> Context<'a, '_> {
         }
     }
 
+    /// Appends a submenu to the current menu (for nested menus inside a flyout).
+    ///
+    /// Unlike `menubar_menu_begin` which is for the top-level menubar,
+    /// this function properly creates a row and handles focus for nested submenus.
+    /// Returns true if the submenu is open. Continue appending items to it in that case.
+    pub fn menubar_submenu_begin(&mut self, text: &str, accelerator: char) -> bool {
+        let accelerator = if cfg!(target_os = "macos") { '\0' } else { accelerator };
+        let mixin = self.tree.current_node.borrow().child_count as u64;
+        self.next_block_id_mixin(mixin);
+
+        // Create a row for this submenu item (like menubar_menu_checkbox does)
+        self.table_next_row();
+        self.attr_focusable();
+
+        // Check if the ROW contains focus (before creating the button, since the flyout
+        // will be a child of the row, not the button)
+        let row_contains_focus = self.contains_focus();
+
+        if self.is_focused() {
+            self.attr_background_rgba(self.indexed(IndexedColor::Green));
+            self.attr_foreground_rgba(self.contrasted(self.indexed(IndexedColor::Green)));
+        }
+
+        let clicked = self.button_activated()
+            || (accelerator != '\0' && self.consume_shortcut(InputKey::new(accelerator as u32)));
+
+        self.button_label(
+            "submenu_button",
+            text,
+            ButtonStyle::default().accelerator(accelerator).bracketed(false),
+        );
+        self.attr_padding(Rect::two(0, 1));
+
+        if row_contains_focus || clicked {
+            self.attr_background_rgba(self.tui.floater_default_bg);
+            self.attr_foreground_rgba(self.tui.floater_default_fg);
+
+            self.next_block_id_mixin(mixin);
+            self.table_begin("flyout");
+            self.attr_float(FloatSpec {
+                anchor: Anchor::Last,
+                gravity_x: 0.0,
+                gravity_y: 0.0,
+                offset_x: 1.0,  // Offset to the right for nested submenu
+                offset_y: 0.0,
+            });
+            self.attr_border();
+            self.attr_focus_well();
+
+            if clicked {
+                self.steal_focus();
+            }
+
+            true
+        } else {
+            false
+        }
+    }
+
     /// Appends a button to the current menu.
     pub fn menubar_menu_button(
         &mut self,
@@ -3221,28 +3280,37 @@ impl<'a> Context<'a, '_> {
 
     /// Ends the current menu.
     pub fn menubar_menu_end(&mut self) {
+        // Check for Escape BEFORE ending the flyout, while current_node is still the flyout
+        // and we can accurately check if it contains focus
+        let should_handle_escape = !self.input_consumed
+            && self.input_keyboard == Some(vk::ESCAPE)
+            && {
+                // Check if current_node (the flyout) is in the focus path
+                let cn = self.tree.current_node.borrow();
+                self.tui.is_subtree_focused_alt(cn.id, cn.depth)
+            };
+
         self.table_end();
 
-        if !self.input_consumed
+        if should_handle_escape {
+            // The flyout contained focus, so handle Escape
+            // by passing focus back to the parent menu/menubar.
+            self.tui.pop_focusable_node(1);
+            self.set_input_consumed();
+        } else if !self.input_consumed
             && let Some(key) = self.input_keyboard
-            && matches!(key, vk::ESCAPE | vk::UP | vk::DOWN)
+            && matches!(key, vk::UP | vk::DOWN)
         {
-            if matches!(key, vk::UP | vk::DOWN) {
-                // If the focus is on the menubar, and the user presses up/down,
-                // focus the first/last item of the flyout respectively.
-                let ln = self.tree.last_node.borrow();
-                if self.tui.is_node_focused(ln.parent.map_or(0, |n| n.borrow().id)) {
-                    let selected_next =
-                        if key == vk::UP { ln.children.last } else { ln.children.first };
-                    if let Some(selected_next) = selected_next {
-                        self.steal_focus_for(selected_next);
-                        self.set_input_consumed();
-                    }
+            // If the focus is on the menubar, and the user presses up/down,
+            // focus the first/last item of the flyout respectively.
+            let ln = self.tree.last_node.borrow();
+            if self.tui.is_node_focused(ln.parent.map_or(0, |n| n.borrow().id)) {
+                let selected_next =
+                    if key == vk::UP { ln.children.last } else { ln.children.first };
+                if let Some(selected_next) = selected_next {
+                    self.steal_focus_for(selected_next);
+                    self.set_input_consumed();
                 }
-            } else if self.contains_focus() {
-                // Otherwise, if the menu is the focused one and the
-                // user presses Escape, pass focus back to the menubar.
-                self.tui.pop_focusable_node(1);
             }
         }
     }

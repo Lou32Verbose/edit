@@ -344,13 +344,13 @@ pub fn draw_theme_picker(ctx: &mut Context, state: &mut State) {
     let mut done = false;
 
     ctx.modal_begin("theme-picker", "Theme Picker");
-    ctx.attr_intrinsic_size(Size { width: 40, height: 16 });
+    ctx.attr_intrinsic_size(Size { width: 40, height: 14 });
     {
         if ctx.contains_focus() && ctx.consume_shortcut(vk::ESCAPE) {
             done = true;
         }
 
-        ctx.scrollarea_begin("themes", Size { width: 0, height: 10 });
+        ctx.scrollarea_begin("themes", Size { width: 0, height: 12 });
         ctx.attr_padding(Rect::two(1, 2));
         {
             ctx.list_begin("items");

@@ -324,8 +324,11 @@ fn print_version() {
 }
 
 fn draw(ctx: &mut Context, state: &mut State) {
-    // Handle ESC to exit at top level BEFORE any TUI widgets consume it.
-    // Must be checked first because textarea and focus navigation consume ESC.
+    // Draw menubar first so it can handle ESC to close menus
+    draw_menubar(ctx, state);
+
+    // Handle ESC to exit at top level, but only if menubar didn't consume it
+    // (keyboard_input() returns None if input was consumed)
     if state.settings.escape_to_exit
         && ctx.keyboard_input() == Some(vk::ESCAPE)
         && is_at_top_level(state)
@@ -335,8 +338,6 @@ fn draw(ctx: &mut Context, state: &mut State) {
         ctx.needs_rerender();
         return;
     }
-
-    draw_menubar(ctx, state);
     draw_editor(ctx, state);
     draw_statusbar(ctx, state);
 
@@ -372,6 +373,9 @@ fn draw(ctx: &mut Context, state: &mut State) {
     }
     if state.wants_theme_picker {
         draw_theme_picker(ctx, state);
+    }
+    if state.wants_recent_files {
+        draw_menubar::draw_recent_files(ctx, state);
     }
     if state.wants_keybinding_editor {
         draw_keybinding_editor(ctx, state);
@@ -427,8 +431,20 @@ fn draw(ctx: &mut Context, state: &mut State) {
             commands::run_command(ctx, state, commands::CommandId::EditReplace);
         } else if key == state.keybindings.shortcut(commands::CommandId::FindInFiles) {
             commands::run_command(ctx, state, commands::CommandId::FindInFiles);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditDuplicateLine) {
+            commands::run_command(ctx, state, commands::CommandId::EditDuplicateLine);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditDeleteLine) {
+            commands::run_command(ctx, state, commands::CommandId::EditDeleteLine);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditJoinLines) {
+            commands::run_command(ctx, state, commands::CommandId::EditJoinLines);
+        } else if key == state.keybindings.shortcut(commands::CommandId::EditGotoMatchingBracket) {
+            commands::run_command(ctx, state, commands::CommandId::EditGotoMatchingBracket);
         } else if key == state.keybindings.shortcut(commands::CommandId::CommandPalette) {
             commands::run_command(ctx, state, commands::CommandId::CommandPalette);
+        } else if key == state.keybindings.shortcut(commands::CommandId::ThemePicker) {
+            commands::run_command(ctx, state, commands::CommandId::ThemePicker);
+        } else if key == state.keybindings.shortcut(commands::CommandId::QuickSwitcher) {
+            commands::run_command(ctx, state, commands::CommandId::QuickSwitcher);
         } else if key == state.keybindings.shortcut(commands::CommandId::SettingsOpenConfig) {
             commands::run_command(ctx, state, commands::CommandId::SettingsOpenConfig);
         } else if key == state.keybindings.shortcut(commands::CommandId::SettingsReload) {
@@ -458,6 +474,7 @@ fn is_at_top_level(state: &State) -> bool {
         && !state.wants_command_palette
         && !state.wants_quick_switcher
         && !state.wants_theme_picker
+        && !state.wants_recent_files
         && !state.wants_keybinding_editor
         && !state.wants_about
         && !state.wants_context_help

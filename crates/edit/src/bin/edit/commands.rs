@@ -24,6 +24,7 @@ pub enum CommandId {
     FileNew,
     FileOpen,
     FileOpenFolder,
+    FileOpenRecent,
     FileOpenRecentFolder,
     FileSave,
     FileSaveAs,
@@ -90,6 +91,7 @@ pub fn command_list() -> Vec<Command> {
         Command { id: FileNew, label: loc(LocId::FileNew), requires_document: false, show_in_palette: true },
         Command { id: FileOpen, label: loc(LocId::FileOpen), requires_document: false, show_in_palette: true },
         Command { id: FileOpenFolder, label: "Open Folder", requires_document: false, show_in_palette: true },
+        Command { id: FileOpenRecent, label: "Open Recent", requires_document: false, show_in_palette: true },
         Command { id: FileOpenRecentFolder, label: "Open Recent Folder", requires_document: false, show_in_palette: true },
         Command { id: FileSave, label: loc(LocId::FileSave), requires_document: true, show_in_palette: true },
         Command { id: FileSaveAs, label: loc(LocId::FileSaveAs), requires_document: true, show_in_palette: true },
@@ -148,6 +150,7 @@ pub fn shortcut(id: CommandId) -> InputKey {
         FileNew => kbmod::CTRL | vk::N,
         FileOpen => kbmod::CTRL | vk::O,
         FileOpenFolder => kbmod::CTRL_SHIFT | vk::O,
+        FileOpenRecent => vk::NULL,
         FileOpenRecentFolder => vk::NULL,
         FileSave => kbmod::CTRL | vk::S,
         FileSaveAs => kbmod::CTRL_SHIFT | vk::S,
@@ -178,7 +181,7 @@ pub fn shortcut(id: CommandId) -> InputKey {
         HelpContext => vk::NULL,
         HelpQuickStart => vk::NULL,
         CommandPalette => vk::F1,
-        ThemePicker => vk::F12, // Changed from Ctrl+Shift+T to avoid Windows Terminal "New Tab" conflict
+        ThemePicker => kbmod::CTRL | vk::T, // Ctrl+T for Theme picker
         QuickSwitcher => kbmod::CTRL | vk::E,
         SettingsOpenConfig => vk::NULL,
         SettingsReload => vk::NULL,
@@ -208,6 +211,10 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
         FileNew => crate::state::draw_add_untitled_document(ctx, state),
         FileOpen => state.wants_file_picker = StateFilePicker::Open,
         FileOpenFolder => state.wants_file_picker = StateFilePicker::OpenFolder,
+        FileOpenRecent => {
+            state.wants_recent_files = true;
+            state.recent_files_selected = 0;
+        }
         FileOpenRecentFolder => {
             state.wants_quick_switcher = true;
             state.quick_switcher_query = "folder:".to_string();
@@ -435,6 +442,7 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         CommandId::FileNew
         | CommandId::FileOpen
         | CommandId::FileOpenFolder
+        | CommandId::FileOpenRecent
         | CommandId::FileOpenRecentFolder
         | CommandId::FileSave
         | CommandId::FileSaveAs

@@ -61,8 +61,16 @@ fn draw_menu_file(ctx: &mut Context, state: &mut State) {
         state.wants_file_picker = StateFilePicker::OpenFolder;
     }
     if ctx.menubar_menu_button(
-        "Open Recent Folder",
+        "Open Recent",
         'R',
+        state.keybindings.shortcut(commands::CommandId::FileOpenRecent),
+    ) {
+        state.wants_recent_files = true;
+        state.recent_files_selected = 0;
+    }
+    if ctx.menubar_menu_button(
+        "Open Recent Folder",
+        'L',
         state.keybindings.shortcut(commands::CommandId::FileOpenRecentFolder),
     ) {
         state.wants_quick_switcher = true;
@@ -100,6 +108,80 @@ fn draw_menu_file(ctx: &mut Context, state: &mut State) {
         state.wants_exit = true;
     }
     ctx.menubar_menu_end();
+}
+
+pub fn draw_recent_files(ctx: &mut Context, state: &mut State) {
+    let mut activated_path: Option<std::path::PathBuf> = None;
+    let mut done = false;
+
+    ctx.modal_begin("recent_files", "Open Recent");
+    ctx.attr_intrinsic_size(Size { width: 60, height: 16 });
+    {
+        if ctx.contains_focus() && ctx.consume_shortcut(vk::ESCAPE) {
+            done = true;
+        }
+
+        if state.recent_files.is_empty() {
+            ctx.block_begin("empty");
+            ctx.attr_padding(Rect::two(2, 2));
+            {
+                ctx.label("msg", "(No recent files)");
+                ctx.attr_position(Position::Center);
+            }
+            ctx.block_end();
+        } else {
+            ctx.scrollarea_begin("files", Size { width: 0, height: 14 });
+            ctx.attr_padding(Rect::two(1, 2));
+            {
+                ctx.list_begin("items");
+                ctx.focus_on_first_present();
+                ctx.inherit_focus();
+
+                for (i, path) in state.recent_files.iter().enumerate() {
+                    // Format: "filename - full/path"
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                    let dir = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+                    let display = arena_format!(ctx.arena(), "{} - {}", name, dir);
+
+                    let selected = i == state.recent_files_selected;
+                    let selection = ctx.list_item(selected, &display);
+                    if selection == ListSelection::Selected {
+                        state.recent_files_selected = i;
+                    } else if selection == ListSelection::Activated {
+                        activated_path = Some(path.clone());
+                        done = true;
+                    }
+                }
+
+                ctx.list_end();
+            }
+            ctx.scrollarea_end();
+        }
+    }
+    if ctx.modal_end() {
+        done = true;
+    }
+
+    // Open the activated file
+    if let Some(path) = activated_path {
+        match state.documents.add_file_path(&path, &state.settings) {
+            Ok(crate::documents::OpenOutcome::Opened) => {
+                // File opened successfully
+            }
+            Ok(crate::documents::OpenOutcome::BinaryDetected { path, goto }) => {
+                state.wants_binary_prompt = true;
+                state.binary_prompt_path = Some(path);
+                state.binary_prompt_goto = goto;
+            }
+            Err(err) => error_log_add(ctx, state, err),
+        }
+    }
+
+    if done {
+        state.wants_recent_files = false;
+        state.recent_files_selected = 0;
+        ctx.needs_rerender();
+    }
 }
 
 fn draw_menu_edit(ctx: &mut Context, state: &mut State) {
@@ -250,7 +332,7 @@ fn draw_menu_view(ctx: &mut Context, state: &mut State) {
         ) {
             state.wants_keybinding_editor = true;
         }
-        if ctx.menubar_menu_begin("Theme", 'T') {
+        if ctx.menubar_submenu_begin("Theme", 'T') {
             draw_menu_theme(ctx, state);
         }
         if ctx.menubar_menu_button(
