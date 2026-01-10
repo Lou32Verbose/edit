@@ -2340,7 +2340,7 @@ impl<'a> Context<'a, '_> {
                     } else {
                         CursorMovement::Grapheme
                     };
-                    tb.delete(granularity, -1);
+                    tb.delete_all(granularity, -1);
                 }
                 vk::TAB => {
                     if single_line {
@@ -2357,8 +2357,14 @@ impl<'a> Context<'a, '_> {
                     write = b"\n";
                 }
                 vk::ESCAPE => {
-                    // If there was a selection, clear it and show the cursor (= fallthrough).
-                    if !tb.clear_selection() {
+                    // First, clear block selection if present
+                    if tb.has_block_selection() {
+                        tb.clear_block_selection();
+                    } else if tb.has_multiple_cursors() {
+                        // Then, collapse multiple cursors if present
+                        tb.collapse_cursors();
+                    } else if !tb.clear_selection() {
+                        // If there was a selection, clear it and show the cursor (= fallthrough).
                         if single_line {
                             // If this is just a simple input field, don't consume the escape key
                             // (early return) and don't show the cursor (= return false).
@@ -2505,17 +2511,21 @@ impl<'a> Context<'a, '_> {
                     }
                 }
                 vk::LEFT => {
-                    let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
-                        CursorMovement::Word
+                    if modifiers == kbmod::ALT_SHIFT {
+                        tb.block_selection_extend(-1, 0);
                     } else {
-                        CursorMovement::Grapheme
-                    };
-                    if modifiers.contains(kbmod::SHIFT) {
-                        tb.selection_update_delta(granularity, -1);
-                    } else if let Some((beg, _)) = tb.selection_range() {
-                        unsafe { tb.set_cursor(beg) };
-                    } else {
-                        tb.cursor_move_delta(granularity, -1);
+                        let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
+                            CursorMovement::Word
+                        } else {
+                            CursorMovement::Grapheme
+                        };
+                        if modifiers.contains(kbmod::SHIFT) {
+                            tb.selection_update_delta(granularity, -1);
+                        } else if let Some((beg, _)) = tb.selection_range() {
+                            unsafe { tb.set_cursor(beg) };
+                        } else {
+                            tb.cursor_move_delta(granularity, -1);
+                        }
                     }
                 }
                 vk::UP => {
@@ -2560,24 +2570,27 @@ impl<'a> Context<'a, '_> {
                             });
                         }
                         kbmod::ALT => tb.move_selected_lines(MoveLineDirection::Up),
-                        kbmod::CTRL_ALT => {
-                            // TODO: Add cursor above
-                        }
+                        kbmod::CTRL_ALT => tb.add_cursor_above(),
+                        kbmod::ALT_SHIFT => tb.block_selection_extend(0, -1),
                         _ => return false,
                     }
                 }
                 vk::RIGHT => {
-                    let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
-                        CursorMovement::Word
+                    if modifiers == kbmod::ALT_SHIFT {
+                        tb.block_selection_extend(1, 0);
                     } else {
-                        CursorMovement::Grapheme
-                    };
-                    if modifiers.contains(kbmod::SHIFT) {
-                        tb.selection_update_delta(granularity, 1);
-                    } else if let Some((_, end)) = tb.selection_range() {
-                        unsafe { tb.set_cursor(end) };
-                    } else {
-                        tb.cursor_move_delta(granularity, 1);
+                        let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
+                            CursorMovement::Word
+                        } else {
+                            CursorMovement::Grapheme
+                        };
+                        if modifiers.contains(kbmod::SHIFT) {
+                            tb.selection_update_delta(granularity, 1);
+                        } else if let Some((_, end)) = tb.selection_range() {
+                            unsafe { tb.set_cursor(end) };
+                        } else {
+                            tb.cursor_move_delta(granularity, 1);
+                        }
                     }
                 }
                 vk::DOWN => {
@@ -2631,9 +2644,8 @@ impl<'a> Context<'a, '_> {
                             }
                         }
                         kbmod::ALT => tb.move_selected_lines(MoveLineDirection::Down),
-                        kbmod::CTRL_ALT => {
-                            // TODO: Add cursor above
-                        }
+                        kbmod::CTRL_ALT => tb.add_cursor_below(),
+                        kbmod::ALT_SHIFT => tb.block_selection_extend(0, 1),
                         _ => return false,
                     }
                 }
@@ -2644,8 +2656,8 @@ impl<'a> Context<'a, '_> {
                 },
                 vk::DELETE => match modifiers {
                     kbmod::SHIFT => tb.cut(self.clipboard_mut()),
-                    kbmod::CTRL => tb.delete(CursorMovement::Word, 1),
-                    _ => tb.delete(CursorMovement::Grapheme, 1),
+                    kbmod::CTRL => tb.delete_all(CursorMovement::Word, 1),
+                    _ => tb.delete_all(CursorMovement::Grapheme, 1),
                 },
                 vk::A => match modifiers {
                     kbmod::CTRL => tb.select_all(),
@@ -2668,7 +2680,7 @@ impl<'a> Context<'a, '_> {
                     _ => return false,
                 },
                 vk::H => match modifiers {
-                    kbmod::CTRL => tb.delete(CursorMovement::Word, -1),
+                    kbmod::CTRL => tb.delete_all(CursorMovement::Word, -1),
                     _ => return false,
                 },
                 vk::L => match modifiers {
@@ -2710,7 +2722,7 @@ impl<'a> Context<'a, '_> {
             write = unicode::strip_newline(&write[..end]);
         }
         if !write.is_empty() {
-            tb.write_canon(write);
+            tb.write_canon_all(write);
             change_preferred_column = true;
             make_cursor_visible = true;
         }

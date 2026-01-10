@@ -76,6 +76,24 @@ struct TextBufferSelection {
     end: Point,
 }
 
+/// A secondary cursor with its optional selection.
+/// Primary cursor is stored separately for backwards compatibility.
+#[derive(Copy, Clone)]
+struct SecondaryCursor {
+    cursor: Cursor,
+    selection: Option<TextBufferSelection>,
+}
+
+/// Block (rectangular/column) selection state.
+/// When active, represents a rectangular region of text.
+#[derive(Copy, Clone)]
+struct BlockSelection {
+    /// The anchor point where the block selection started (logical position).
+    anchor: Point,
+    /// The starting column (visual) of the block selection.
+    start_column: CoordType,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Language {
     PlainText,
@@ -251,6 +269,7 @@ struct ActiveEditGroupInfo {
 }
 
 /// Char- or word-wise navigation? Your choice.
+#[derive(Clone, Copy)]
 pub enum CursorMovement {
     Grapheme,
     Word,
@@ -300,6 +319,12 @@ pub struct TextBuffer {
     cursor_for_rendering: Option<Cursor>,
     selection: Option<TextBufferSelection>,
     selection_generation: u32,
+    // Additional cursors for multi-cursor editing.
+    // The primary cursor is `cursor` above; these are secondary cursors.
+    secondary_cursors: Vec<SecondaryCursor>,
+    // Block (rectangular/column) selection state.
+    // When Some, we're in block selection mode.
+    block_selection: Option<BlockSelection>,
     search: Option<UnsafeCell<ActiveSearch>>,
 
     width: CoordType,
@@ -351,6 +376,8 @@ impl TextBuffer {
             cursor_for_rendering: None,
             selection: None,
             selection_generation: 0,
+            secondary_cursors: Vec::new(),
+            block_selection: None,
             search: None,
 
             width: 0,
@@ -1234,6 +1261,365 @@ impl TextBuffer {
         had_selection
     }
 
+    // ==================== Multi-cursor support ====================
+
+    /// Returns whether there are multiple cursors active.
+    pub fn has_multiple_cursors(&self) -> bool {
+        !self.secondary_cursors.is_empty()
+    }
+
+    /// Returns the number of cursors (primary + secondary).
+    pub fn cursor_count(&self) -> usize {
+        1 + self.secondary_cursors.len()
+    }
+
+    /// Returns an iterator over all cursors (primary first, then secondary).
+    pub fn all_cursors(&self) -> impl Iterator<Item = Cursor> + '_ {
+        std::iter::once(self.cursor).chain(self.secondary_cursors.iter().map(|sc| sc.cursor))
+    }
+
+    /// Returns an iterator over all selection ranges, sorted by position.
+    /// Each range is (begin_cursor, end_cursor).
+    #[allow(dead_code)]
+    pub fn all_selection_ranges(&self) -> Vec<(Cursor, Cursor)> {
+        let mut ranges: Vec<(Cursor, Cursor)> = Vec::new();
+
+        // Primary cursor selection
+        if let Some(range) = self.selection_range() {
+            ranges.push(range);
+        }
+
+        // Secondary cursor selections
+        for sc in &self.secondary_cursors {
+            if let Some(sel) = sc.selection {
+                let [beg, end] = minmax(sel.beg, sel.end);
+                let beg_cursor = self.cursor_move_to_logical_internal(sc.cursor, beg);
+                let end_cursor = self.cursor_move_to_logical_internal(beg_cursor, end);
+                if beg_cursor.offset < end_cursor.offset {
+                    ranges.push((beg_cursor, end_cursor));
+                }
+            }
+        }
+
+        // Sort by offset
+        ranges.sort_by_key(|(beg, _)| beg.offset);
+        ranges
+    }
+
+    /// Adds a cursor at the given logical position.
+    /// If a cursor already exists at that position, nothing happens.
+    pub fn add_cursor_at_logical(&mut self, pos: Point) {
+        let new_cursor = self.cursor_move_to_logical_internal(self.cursor, pos);
+
+        // Check if cursor already exists at this offset
+        if self.cursor.offset == new_cursor.offset {
+            return;
+        }
+        for sc in &self.secondary_cursors {
+            if sc.cursor.offset == new_cursor.offset {
+                return;
+            }
+        }
+
+        self.secondary_cursors.push(SecondaryCursor {
+            cursor: new_cursor,
+            selection: None,
+        });
+        self.normalize_cursors();
+    }
+
+    /// Adds a cursor at the given visual position.
+    pub fn add_cursor_at_visual(&mut self, pos: Point) {
+        let new_cursor = self.cursor_move_to_visual_internal(self.cursor, pos);
+
+        // Check if cursor already exists at this offset
+        if self.cursor.offset == new_cursor.offset {
+            return;
+        }
+        for sc in &self.secondary_cursors {
+            if sc.cursor.offset == new_cursor.offset {
+                return;
+            }
+        }
+
+        self.secondary_cursors.push(SecondaryCursor {
+            cursor: new_cursor,
+            selection: None,
+        });
+        self.normalize_cursors();
+    }
+
+    /// Adds a cursor above the current cursor (same column, previous line).
+    pub fn add_cursor_above(&mut self) {
+        let pos = self.cursor.logical_pos;
+        if pos.y > 0 {
+            self.add_cursor_at_logical(Point { x: pos.x, y: pos.y - 1 });
+        }
+    }
+
+    /// Adds a cursor below the current cursor (same column, next line).
+    pub fn add_cursor_below(&mut self) {
+        let pos = self.cursor.logical_pos;
+        if pos.y < self.stats.logical_lines - 1 {
+            self.add_cursor_at_logical(Point { x: pos.x, y: pos.y + 1 });
+        }
+    }
+
+    /// Adds a cursor at the next occurrence of the current selection.
+    /// If there's no selection, selects the current word first.
+    /// This is the Ctrl+D behavior in VS Code.
+    pub fn add_cursor_at_next_occurrence(&mut self) {
+        // If there's no selection, select the current word first
+        if self.selection.is_none() {
+            self.select_word();
+            return; // First Ctrl+D just selects the word
+        }
+
+        // Get the selected text
+        let (beg, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return,
+        };
+
+        // Extract the selected text
+        let mut selected_text = Vec::new();
+        self.buffer.extract_raw(beg.offset..end.offset, &mut selected_text, 0);
+
+        if selected_text.is_empty() {
+            return;
+        }
+
+        // Search for the next occurrence starting after the current selection end
+        let search_start = end.offset;
+
+        // Search forward from end of selection
+        if let Some(found_offset) = self.find_next_occurrence(&selected_text, search_start) {
+            let found_beg = self.cursor_move_to_offset_internal(self.cursor, found_offset);
+            let found_end = self.cursor_move_to_offset_internal(found_beg, found_offset + selected_text.len());
+
+            // Add as secondary cursor with selection
+            self.secondary_cursors.push(SecondaryCursor {
+                cursor: found_end,
+                selection: Some(TextBufferSelection {
+                    beg: found_beg.logical_pos,
+                    end: found_end.logical_pos,
+                }),
+            });
+            self.normalize_cursors();
+        } else {
+            // Wrap around: search from beginning of document
+            if let Some(found_offset) = self.find_next_occurrence(&selected_text, 0) {
+                // Only add if it's before our original selection
+                if found_offset < beg.offset {
+                    let found_beg = self.cursor_move_to_offset_internal(self.cursor, found_offset);
+                    let found_end = self.cursor_move_to_offset_internal(found_beg, found_offset + selected_text.len());
+
+                    self.secondary_cursors.push(SecondaryCursor {
+                        cursor: found_end,
+                        selection: Some(TextBufferSelection {
+                            beg: found_beg.logical_pos,
+                            end: found_end.logical_pos,
+                        }),
+                    });
+                    self.normalize_cursors();
+                }
+            }
+        }
+    }
+
+    /// Finds the next occurrence of a byte pattern starting at the given offset.
+    /// Returns the offset of the match or None if not found.
+    fn find_next_occurrence(&self, pattern: &[u8], start: usize) -> Option<usize> {
+        if pattern.is_empty() {
+            return None;
+        }
+
+        let text_len = self.text_length();
+        let mut offset = start;
+
+        while offset + pattern.len() <= text_len {
+            let chunk = self.buffer.read_forward(offset);
+
+            // Search within this chunk
+            if let Some(pos) = find_subsequence(chunk, pattern) {
+                return Some(offset + pos);
+            }
+
+            // Move to next chunk, but handle the case where the pattern might span chunks
+            if chunk.len() > pattern.len() {
+                offset += chunk.len() - pattern.len() + 1;
+            } else {
+                offset += 1;
+            }
+        }
+
+        None
+    }
+
+    /// Collapses all cursors to just the primary cursor.
+    pub fn collapse_cursors(&mut self) {
+        self.secondary_cursors.clear();
+    }
+
+    /// Normalizes cursors by sorting them and removing duplicates.
+    /// After text edits, cursors may have become invalid or overlapping.
+    fn normalize_cursors(&mut self) {
+        if self.secondary_cursors.is_empty() {
+            return;
+        }
+
+        // Sort secondary cursors by offset
+        self.secondary_cursors.sort_by_key(|sc| sc.cursor.offset);
+
+        // Remove duplicates (cursors at the same offset)
+        self.secondary_cursors.dedup_by_key(|sc| sc.cursor.offset);
+
+        // Remove any secondary cursor at the same offset as primary
+        self.secondary_cursors.retain(|sc| sc.cursor.offset != self.cursor.offset);
+    }
+
+    /// Recalculates all secondary cursor positions after text modification.
+    /// Call this after edits that change the buffer content.
+    #[allow(dead_code)]
+    fn refresh_secondary_cursors(&mut self) {
+        let text_len = self.text_length();
+        for i in 0..self.secondary_cursors.len() {
+            // Clamp offset to valid range
+            let offset = self.secondary_cursors[i].cursor.offset.min(text_len);
+            let new_cursor = self.cursor_move_to_offset_internal(Default::default(), offset);
+            self.secondary_cursors[i].cursor = new_cursor;
+
+            // Update selection if present
+            if let Some(sel) = self.secondary_cursors[i].selection {
+                // Re-validate selection points - they use logical positions
+                // which should still be valid after the edit
+                let cursor = self.secondary_cursors[i].cursor;
+                let beg = self.cursor_move_to_logical_internal(cursor, sel.beg);
+                let end = self.cursor_move_to_logical_internal(beg, sel.end);
+                if beg.offset >= end.offset {
+                    self.secondary_cursors[i].selection = None;
+                }
+            }
+        }
+        self.normalize_cursors();
+    }
+
+    // ==================== Block selection support ====================
+
+    /// Returns whether block selection mode is active.
+    pub fn has_block_selection(&self) -> bool {
+        self.block_selection.is_some()
+    }
+
+    /// Starts block selection at the current cursor position.
+    pub fn start_block_selection(&mut self) {
+        if self.block_selection.is_none() {
+            self.block_selection = Some(BlockSelection {
+                anchor: self.cursor.logical_pos,
+                start_column: self.cursor.visual_pos.x,
+            });
+        }
+    }
+
+    /// Clears block selection mode.
+    pub fn clear_block_selection(&mut self) {
+        self.block_selection = None;
+    }
+
+    /// Extends block selection in the given direction.
+    /// delta_x: -1 for left, 1 for right, 0 for no horizontal movement
+    /// delta_y: -1 for up, 1 for down, 0 for no vertical movement
+    pub fn block_selection_extend(&mut self, delta_x: CoordType, delta_y: CoordType) {
+        // Start block selection if not already active
+        if self.block_selection.is_none() {
+            self.start_block_selection();
+        }
+
+        // Move cursor
+        let new_pos = Point {
+            x: (self.cursor.visual_pos.x + delta_x).max(0),
+            y: (self.cursor.visual_pos.y + delta_y).max(0).min(self.stats.visual_lines - 1),
+        };
+        self.cursor_move_to_visual(new_pos);
+    }
+
+    /// Returns the block selection bounds if active.
+    /// Returns (top_line, bottom_line, left_column, right_column) in visual coordinates.
+    pub fn block_selection_bounds(&self) -> Option<(CoordType, CoordType, CoordType, CoordType)> {
+        let block = self.block_selection?;
+
+        let anchor_visual = self.cursor_move_to_logical_internal(self.cursor, block.anchor);
+
+        let top = anchor_visual.visual_pos.y.min(self.cursor.visual_pos.y);
+        let bottom = anchor_visual.visual_pos.y.max(self.cursor.visual_pos.y);
+        let left = block.start_column.min(self.cursor.visual_pos.x);
+        let right = block.start_column.max(self.cursor.visual_pos.x);
+
+        Some((top, bottom, left, right))
+    }
+
+    /// Converts the current block selection to multiple cursors.
+    /// Each line in the block selection gets a cursor at the left edge of the selection.
+    /// Called before editing to enable multi-cursor editing of the block.
+    pub fn block_selection_to_cursors(&mut self) {
+        let Some((top, bottom, left, right)) = self.block_selection_bounds() else {
+            return;
+        };
+
+        // Clear existing secondary cursors
+        self.secondary_cursors.clear();
+
+        // Create a cursor for each line in the block
+        for visual_y in top..=bottom {
+            let cursor = self.cursor_move_to_visual_internal(
+                self.cursor,
+                Point { x: left, y: visual_y },
+            );
+
+            // Calculate selection end for this line
+            let cursor_end = self.cursor_move_to_visual_internal(
+                cursor,
+                Point { x: right, y: visual_y },
+            );
+
+            if visual_y == self.cursor.visual_pos.y {
+                // This is the primary cursor's line
+                self.cursor = cursor_end;
+                if left != right {
+                    self.selection = Some(TextBufferSelection {
+                        beg: cursor.logical_pos,
+                        end: cursor_end.logical_pos,
+                    });
+                } else {
+                    self.selection = None;
+                }
+            } else {
+                // Add as secondary cursor
+                let selection = if left != right {
+                    Some(TextBufferSelection {
+                        beg: cursor.logical_pos,
+                        end: cursor_end.logical_pos,
+                    })
+                } else {
+                    None
+                };
+
+                self.secondary_cursors.push(SecondaryCursor {
+                    cursor: cursor_end,
+                    selection,
+                });
+            }
+        }
+
+        // Clear block selection mode
+        self.block_selection = None;
+        self.normalize_cursors();
+    }
+
+    // ==================== End block selection support ====================
+
+    // ==================== End multi-cursor support ====================
+
     /// Find the next occurrence of the given `pattern` and select it.
     pub fn find_and_select(&mut self, pattern: &str, options: SearchOptions) -> apperr::Result<()> {
         if let Some(search) = &mut self.search {
@@ -1816,6 +2202,51 @@ impl TextBuffer {
         unsafe { self.set_cursor(self.cursor_move_delta_internal(self.cursor, granularity, delta)) }
     }
 
+    /// Moves all cursors (primary and secondary) by the given delta.
+    /// This is used for arrow key navigation when multiple cursors are active.
+    pub fn cursor_move_delta_all(&mut self, granularity: CursorMovement, delta: CoordType) {
+        // Move primary cursor
+        let new_primary = self.cursor_move_delta_internal(self.cursor, granularity, delta);
+        unsafe { self.set_cursor(new_primary) };
+
+        // Move all secondary cursors
+        for i in 0..self.secondary_cursors.len() {
+            let cursor = self.secondary_cursors[i].cursor;
+            self.secondary_cursors[i].cursor = self.cursor_move_delta_internal(cursor, granularity, delta);
+            self.secondary_cursors[i].selection = None; // Clear selection when moving without shift
+        }
+        self.normalize_cursors();
+    }
+
+    /// Extends selection for all cursors by the given delta.
+    /// This is used for Shift+arrow navigation when multiple cursors are active.
+    pub fn selection_update_delta_all(&mut self, granularity: CursorMovement, delta: CoordType) {
+        // Update primary cursor selection
+        self.set_cursor_for_selection(self.cursor_move_delta_internal(
+            self.cursor,
+            granularity,
+            delta,
+        ));
+
+        // Update all secondary cursor selections
+        for i in 0..self.secondary_cursors.len() {
+            let beg = match self.secondary_cursors[i].selection {
+                Some(TextBufferSelection { beg, .. }) => beg,
+                None => self.secondary_cursors[i].cursor.logical_pos,
+            };
+
+            let cursor = self.secondary_cursors[i].cursor;
+            self.secondary_cursors[i].cursor = self.cursor_move_delta_internal(cursor, granularity, delta);
+            let end = self.secondary_cursors[i].cursor.logical_pos;
+            self.secondary_cursors[i].selection = if beg == end {
+                None
+            } else {
+                Some(TextBufferSelection { beg, end })
+            };
+        }
+        self.normalize_cursors();
+    }
+
     /// Sets the cursor to the given position, and clears the selection.
     ///
     /// # Safety
@@ -1892,6 +2323,9 @@ impl TextBuffer {
             Some(TextBufferSelection { beg, end }) => minmax(beg, end),
         };
 
+        // Get block selection bounds if active (top, bottom, left, right in visual coords)
+        let block_bounds = self.block_selection_bounds();
+
         // Find matching bracket for highlighting (if cursor is on a bracket)
         let matching_bracket_offset = if focused { self.find_matching_bracket_offset() } else { None };
         // Also highlight the bracket under cursor if there's a match
@@ -1958,7 +2392,31 @@ impl TextBuffer {
             let content_byte_start = line.len();
 
             // Figure out the selection range on this line, if any.
-            if cursor_beg.visual_pos.y == visual_line
+            // Block selection takes priority over regular selection.
+            if let Some((block_top, block_bottom, block_left, block_right)) = block_bounds {
+                // Check if this line is within the block selection
+                if visual_line >= block_top && visual_line <= block_bottom {
+                    let left = destination.left + self.margin_width - origin.x;
+                    let top = destination.top + y;
+                    let rect = Rect {
+                        left: left + block_left.max(origin.x),
+                        top,
+                        right: left + block_right.min(origin.x + text_width),
+                        bottom: top + 1,
+                    };
+
+                    let mut bg = fb.indexed(IndexedColor::Foreground).oklab_blend(fb.indexed_alpha(
+                        IndexedColor::BrightBlue,
+                        1,
+                        2,
+                    ));
+                    if !focused {
+                        bg = bg.oklab_blend(fb.indexed_alpha(IndexedColor::Background, 1, 2));
+                    };
+                    let fg = fb.contrasted(bg);
+                    selection_rect = Some((rect, bg, fg));
+                }
+            } else if cursor_beg.visual_pos.y == visual_line
                 && selection_beg <= cursor_end.logical_pos
                 && selection_end >= cursor_beg.logical_pos
             {
@@ -2255,21 +2713,6 @@ impl TextBuffer {
         }
 
         if focused {
-            let mut x = self.cursor.visual_pos.x;
-            let mut y = self.cursor.visual_pos.y;
-
-            if self.word_wrap_column > 0 && x >= self.word_wrap_column {
-                // The line the cursor is on wraps exactly on the word wrap column which
-                // means the cursor is invisible. We need to move it to the next line.
-                x = 0;
-                y += 1;
-            }
-
-            // Move the cursor into screen space.
-            x += destination.left - origin.x + self.margin_width;
-            y += destination.top - origin.y;
-
-            let cursor = Point { x, y };
             let text = Rect {
                 left: destination.left + self.margin_width,
                 top: destination.top,
@@ -2277,19 +2720,49 @@ impl TextBuffer {
                 bottom: destination.bottom,
             };
 
-            if text.contains(cursor) {
-                fb.set_cursor(cursor, self.overtype);
+            // Helper to convert cursor visual position to screen position
+            let cursor_to_screen = |cursor_visual: Point| -> Point {
+                let mut x = cursor_visual.x;
+                let mut y = cursor_visual.y;
+
+                if self.word_wrap_column > 0 && x >= self.word_wrap_column {
+                    // The line the cursor is on wraps exactly on the word wrap column which
+                    // means the cursor is invisible. We need to move it to the next line.
+                    x = 0;
+                    y += 1;
+                }
+
+                // Move the cursor into screen space.
+                x += destination.left - origin.x + self.margin_width;
+                y += destination.top - origin.y;
+
+                Point { x, y }
+            };
+
+            // Render primary cursor
+            let primary_cursor = cursor_to_screen(self.cursor.visual_pos);
+            if text.contains(primary_cursor) {
+                fb.set_cursor(primary_cursor, self.overtype);
 
                 if self.line_highlight_enabled && selection_beg >= selection_end {
                     fb.blend_bg(
                         Rect {
                             left: destination.left,
-                            top: cursor.y,
+                            top: primary_cursor.y,
                             right: destination.right,
-                            bottom: cursor.y + 1,
+                            bottom: primary_cursor.y + 1,
                         },
                         StraightRgba::from_le(0x7f7f7f7f),
                     );
+                }
+            }
+
+            // Render secondary cursors
+            for sc in &self.secondary_cursors {
+                let secondary_cursor = cursor_to_screen(sc.cursor.visual_pos);
+                if text.contains(secondary_cursor) {
+                    // Secondary cursors are rendered as block cursors with a different color
+                    fb.set_cursor(secondary_cursor, true); // Always block for secondary cursors
                 }
             }
         }
@@ -2342,6 +2815,127 @@ impl TextBuffer {
     /// The only transformation applied is that newlines are normalized.
     pub fn write_raw(&mut self, text: &[u8]) {
         self.write(text, self.cursor, true);
+    }
+
+    /// Inserts text at all cursor positions (primary and secondary).
+    /// Processes from end to start to avoid offset shifting issues.
+    pub fn write_canon_all(&mut self, text: &[u8]) {
+        // Convert block selection to multiple cursors before editing
+        if self.has_block_selection() {
+            self.block_selection_to_cursors();
+        }
+
+        if self.secondary_cursors.is_empty() {
+            self.write_canon(text);
+            return;
+        }
+
+        // Collect all cursors with their selections, sorted by offset descending
+        let mut cursors_data: Vec<(Cursor, Option<TextBufferSelection>)> = Vec::new();
+        cursors_data.push((self.cursor, self.selection));
+        for sc in &self.secondary_cursors {
+            cursors_data.push((sc.cursor, sc.selection));
+        }
+        // Sort by offset descending (process from end to start)
+        cursors_data.sort_by(|a, b| b.0.offset.cmp(&a.0.offset));
+
+        self.edit_begin_grouping();
+
+        // Process each cursor from end to start
+        for (cursor, selection) in cursors_data {
+            // Temporarily set the primary cursor and selection
+            self.cursor = cursor;
+            self.selection = selection;
+            self.write(text, self.cursor, false);
+        }
+
+        self.edit_end_grouping();
+
+        // Clear secondary cursors - after multi-cursor edit they'll need to be
+        // recalculated based on the new text positions
+        self.secondary_cursors.clear();
+    }
+
+    /// Deletes at all cursor positions (primary and secondary).
+    /// Uses selection if present, otherwise deletes based on granularity and delta.
+    pub fn delete_all(&mut self, granularity: CursorMovement, delta: CoordType) {
+        // Convert block selection to multiple cursors before editing
+        if self.has_block_selection() {
+            self.block_selection_to_cursors();
+        }
+
+        if self.secondary_cursors.is_empty() {
+            self.delete(granularity, delta);
+            return;
+        }
+
+        if delta == 0 {
+            return;
+        }
+
+        // Collect all deletion ranges, sorted by offset descending
+        let mut deletions: Vec<(Cursor, Cursor)> = Vec::new();
+
+        // Primary cursor
+        if let Some((beg, end)) = self.selection_range_internal(false) {
+            deletions.push((beg, end));
+        } else if !((delta < 0 && self.cursor.offset == 0)
+            || (delta > 0 && self.cursor.offset >= self.text_length()))
+        {
+            let mut beg = self.cursor;
+            let mut end = self.cursor_move_delta_internal(beg, granularity, delta);
+            if beg.offset > end.offset {
+                mem::swap(&mut beg, &mut end);
+            }
+            if beg.offset != end.offset {
+                deletions.push((beg, end));
+            }
+        }
+
+        // Secondary cursors
+        for sc in &self.secondary_cursors {
+            if let Some(sel) = sc.selection {
+                let [beg_pt, end_pt] = minmax(sel.beg, sel.end);
+                let beg = self.cursor_move_to_logical_internal(sc.cursor, beg_pt);
+                let end = self.cursor_move_to_logical_internal(beg, end_pt);
+                if beg.offset < end.offset {
+                    deletions.push((beg, end));
+                }
+            } else if !((delta < 0 && sc.cursor.offset == 0)
+                || (delta > 0 && sc.cursor.offset >= self.text_length()))
+            {
+                let mut beg = sc.cursor;
+                let mut end = self.cursor_move_delta_internal(beg, granularity, delta);
+                if beg.offset > end.offset {
+                    mem::swap(&mut beg, &mut end);
+                }
+                if beg.offset != end.offset {
+                    deletions.push((beg, end));
+                }
+            }
+        }
+
+        if deletions.is_empty() {
+            return;
+        }
+
+        // Sort by offset descending (process from end to start)
+        deletions.sort_by(|a, b| b.0.offset.cmp(&a.0.offset));
+
+        self.edit_begin_grouping();
+
+        // Process each deletion from end to start
+        for (beg, end) in deletions {
+            self.edit_begin(HistoryType::Delete, beg);
+            self.edit_delete(end);
+            self.edit_end();
+        }
+
+        self.edit_end_grouping();
+
+        // Clear secondary cursors and selections
+        self.secondary_cursors.clear();
+        self.set_selection(None);
     }
 
     fn write(&mut self, text: &[u8], at: Cursor, raw: bool) {
@@ -4919,4 +5513,17 @@ fn count_words(text: &[u8]) -> usize {
     }
 
     count
+}
+
+/// Finds the first occurrence of a subsequence in a byte slice.
+/// Returns the starting index or None if not found.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+
+    haystack.windows(needle.len()).position(|window| window == needle)
 }

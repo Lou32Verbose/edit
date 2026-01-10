@@ -43,6 +43,10 @@ pub enum CommandId {
     EditDuplicateLine,
     EditDeleteLine,
     EditJoinLines,
+    EditAddCursorAbove,
+    EditAddCursorBelow,
+    EditAddNextOccurrence,
+    EditCollapseCursors,
     EditSortLinesAsc,
     EditSortLinesDesc,
     EditRemoveDuplicateLines,
@@ -125,6 +129,10 @@ pub fn command_list() -> Vec<Command> {
         Command { id: EditDuplicateLine, label: "Duplicate Line", requires_document: true, show_in_palette: true },
         Command { id: EditDeleteLine, label: "Delete Line", requires_document: true, show_in_palette: true },
         Command { id: EditJoinLines, label: "Join Lines", requires_document: true, show_in_palette: true },
+        Command { id: EditAddCursorAbove, label: "Add Cursor Above", requires_document: true, show_in_palette: true },
+        Command { id: EditAddCursorBelow, label: "Add Cursor Below", requires_document: true, show_in_palette: true },
+        Command { id: EditAddNextOccurrence, label: "Add Selection to Next Find Match", requires_document: true, show_in_palette: true },
+        Command { id: EditCollapseCursors, label: "Collapse Cursors to Single", requires_document: true, show_in_palette: true },
         Command { id: EditSortLinesAsc, label: "Sort Lines (Ascending)", requires_document: true, show_in_palette: true },
         Command { id: EditSortLinesDesc, label: "Sort Lines (Descending)", requires_document: true, show_in_palette: true },
         Command { id: EditRemoveDuplicateLines, label: "Remove Duplicate Lines", requires_document: true, show_in_palette: true },
@@ -196,9 +204,13 @@ pub fn shortcut(id: CommandId) -> InputKey {
         EditReplace => kbmod::CTRL | vk::R,
         EditSelectAll => kbmod::CTRL | vk::A,
         EditSelectLine => kbmod::CTRL | vk::L,
-        EditDuplicateLine => kbmod::CTRL | vk::D,
+        EditDuplicateLine => kbmod::CTRL_SHIFT | vk::D,
         EditDeleteLine => kbmod::CTRL_SHIFT | vk::K,
         EditJoinLines => kbmod::CTRL | vk::J,
+        EditAddCursorAbove => kbmod::CTRL_ALT | vk::UP,
+        EditAddCursorBelow => kbmod::CTRL_ALT | vk::DOWN,
+        EditAddNextOccurrence => kbmod::CTRL | vk::D,
+        EditCollapseCursors => vk::NULL, // Escape handles this
         EditSortLinesAsc => vk::NULL,
         EditSortLinesDesc => vk::NULL,
         EditRemoveDuplicateLines => vk::NULL,
@@ -339,6 +351,30 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
         EditJoinLines => {
             if let Some(doc) = state.documents.active() {
                 doc.buffer.borrow_mut().join_lines();
+                ctx.needs_rerender();
+            }
+        }
+        EditAddCursorAbove => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().add_cursor_above();
+                ctx.needs_rerender();
+            }
+        }
+        EditAddCursorBelow => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().add_cursor_below();
+                ctx.needs_rerender();
+            }
+        }
+        EditAddNextOccurrence => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().add_cursor_at_next_occurrence();
+                ctx.needs_rerender();
+            }
+        }
+        EditCollapseCursors => {
+            if let Some(doc) = state.documents.active() {
+                doc.buffer.borrow_mut().collapse_cursors();
                 ctx.needs_rerender();
             }
         }
@@ -598,6 +634,10 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         | CommandId::EditDuplicateLine
         | CommandId::EditDeleteLine
         | CommandId::EditJoinLines
+        | CommandId::EditAddCursorAbove
+        | CommandId::EditAddCursorBelow
+        | CommandId::EditAddNextOccurrence
+        | CommandId::EditCollapseCursors
         | CommandId::EditSortLinesAsc
         | CommandId::EditSortLinesDesc
         | CommandId::EditRemoveDuplicateLines
