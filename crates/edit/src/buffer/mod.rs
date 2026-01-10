@@ -123,6 +123,7 @@ pub enum Language {
     Latex,
     Mdx,
     Graphql,
+    Csv,
 }
 
 #[derive(Clone, Copy)]
@@ -131,6 +132,7 @@ enum HighlightKind {
     String,
     Number,
     Keyword,
+    CsvColumn(u8),
 }
 
 struct HighlightSpan {
@@ -1909,6 +1911,10 @@ impl TextBuffer {
                 }
             }
 
+            // Track the byte offset where content starts (after the margin).
+            // This differs from margin_width (visual columns) due to multi-byte UTF-8 chars in the margin.
+            let content_byte_start = line.len();
+
             let mut selection_off = 0..0;
 
             // Figure out the selection range on this line, if any.
@@ -2083,8 +2089,7 @@ impl TextBuffer {
 
             if let Some(highlight) = &self.search_highlight {
                 if !highlight.options.use_regex {
-                    let content_start = self.margin_width as usize;
-                    let content = line.get(content_start..).unwrap_or("");
+                    let content = line.get(content_byte_start..).unwrap_or("");
                     let matches =
                         find_search_matches(content, &highlight.needle, highlight.options);
                     if !matches.is_empty() {
@@ -2106,8 +2111,7 @@ impl TextBuffer {
             }
 
             if self.language != Language::PlainText {
-                let content_start = self.margin_width as usize;
-                let content = line.get(content_start..).unwrap_or("");
+                let content = line.get(content_byte_start..).unwrap_or("");
                 let spans = Self::highlight_line(self.language, content);
                 if !spans.is_empty() {
                     let top = destination.top + y;
@@ -2129,6 +2133,19 @@ impl TextBuffer {
                             HighlightKind::String => fb.indexed(IndexedColor::BrightBlue),
                             HighlightKind::Number => fb.indexed(IndexedColor::BrightMagenta),
                             HighlightKind::Keyword => fb.indexed(IndexedColor::BrightYellow),
+                            HighlightKind::CsvColumn(col) => {
+                                const CSV_COLORS: [IndexedColor; 8] = [
+                                    IndexedColor::BrightCyan,
+                                    IndexedColor::BrightYellow,
+                                    IndexedColor::BrightMagenta,
+                                    IndexedColor::BrightGreen,
+                                    IndexedColor::BrightBlue,
+                                    IndexedColor::Cyan,
+                                    IndexedColor::Yellow,
+                                    IndexedColor::Magenta,
+                                ];
+                                fb.indexed(CSV_COLORS[(col % 8) as usize])
+                            }
                         };
                         fb.blend_fg(Rect { left, top, right, bottom: top + 1 }, color);
                     }
@@ -3031,6 +3048,56 @@ impl TextBuffer {
 
         match language {
             Language::PlainText => {}
+            Language::Csv => {
+                let mut column: u8 = 0;
+                let mut field_start: usize = 0;
+                let mut in_quotes = false;
+                let bytes = line.as_bytes();
+                let mut i = 0;
+
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if in_quotes {
+                        if b == b'"' {
+                            // Handle escaped quotes ("")
+                            if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                                i += 2;
+                                continue;
+                            }
+                            in_quotes = false;
+                        }
+                        i += 1;
+                    } else {
+                        match b {
+                            b'"' => {
+                                in_quotes = true;
+                                i += 1;
+                            }
+                            b',' => {
+                                if i > field_start {
+                                    spans.push(HighlightSpan {
+                                        start: field_start,
+                                        end: i,
+                                        kind: HighlightKind::CsvColumn(column),
+                                    });
+                                }
+                                column = column.wrapping_add(1);
+                                field_start = i + 1;
+                                i += 1;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                }
+                // Final field
+                if field_start < bytes.len() {
+                    spans.push(HighlightSpan {
+                        start: field_start,
+                        end: bytes.len(),
+                        kind: HighlightKind::CsvColumn(column),
+                    });
+                }
+            }
             Language::Markdown | Language::Mdx => {
                 let trimmed = line.trim_start();
                 if trimmed.starts_with('#') {

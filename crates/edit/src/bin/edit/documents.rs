@@ -166,6 +166,7 @@ fn language_for_path(path: &Path) -> Language {
         "tex" | "sty" | "cls" => Language::Latex,
         "mdx" => Language::Mdx,
         "graphql" | "gql" => Language::Graphql,
+        "csv" => Language::Csv,
         _ => Language::PlainText,
     }
 }
