@@ -13,10 +13,11 @@ use crate::vt;
 
 /// Represents a key/modifier combination.
 ///
-/// TODO: Is this a good idea? I did it to allow typing `kbmod::CTRL | vk::A`.
-/// The reason it's an awkward u32 and not a struct is to hopefully make ABIs easier later.
-/// Of course you could just translate on the ABI boundary, but my hope is that this
-/// design lets me realize some restrictions early on that I can't foresee yet.
+/// The value is bit-packed for ABI stability and compactness:
+/// - low 24 bits: key code
+/// - high 8 bits: modifiers
+///
+/// Prefer [`InputKey::from_parts`] and [`InputKey::key_code`] for typed access.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InputKey(u32);
@@ -42,8 +43,16 @@ impl InputKey {
         self.0
     }
 
+    pub const fn from_parts(key: KeyCode, modifiers: InputKeyMod) -> Self {
+        Self((key.value() & 0x00FFFFFF) | modifiers.0)
+    }
+
+    pub const fn key_code(&self) -> KeyCode {
+        KeyCode::new(self.0 & 0x00FFFFFF)
+    }
+
     pub const fn key(&self) -> Self {
-        Self(self.0 & 0x00FFFFFF)
+        Self(self.key_code().value())
     }
 
     pub const fn modifiers(&self) -> InputKeyMod {
@@ -55,7 +64,22 @@ impl InputKey {
     }
 
     pub const fn with_modifiers(&self, modifiers: InputKeyMod) -> Self {
-        Self(self.0 | modifiers.0)
+        Self::from_parts(self.key_code(), modifiers)
+    }
+}
+
+/// A keyboard key code without modifiers.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct KeyCode(u32);
+
+impl KeyCode {
+    pub(crate) const fn new(v: u32) -> Self {
+        Self(v)
+    }
+
+    pub const fn value(self) -> u32 {
+        self.0
     }
 }
 
@@ -79,6 +103,14 @@ impl std::ops::BitOr<InputKeyMod> for InputKey {
 
     fn bitor(self, rhs: InputKeyMod) -> Self {
         Self(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOr<InputKeyMod> for KeyCode {
+    type Output = InputKey;
+
+    fn bitor(self, rhs: InputKeyMod) -> InputKey {
+        InputKey::from_parts(self, rhs)
     }
 }
 
@@ -204,6 +236,71 @@ pub mod vk {
     pub const F22: InputKey = InputKey::new(0x85);
     pub const F23: InputKey = InputKey::new(0x86);
     pub const F24: InputKey = InputKey::new(0x87);
+}
+
+/// Typed key constants. Equivalent key set as [`vk`] but without modifiers.
+pub mod key {
+    use super::KeyCode;
+
+    pub const NULL: KeyCode = KeyCode::new('\0' as u32);
+    pub const BACK: KeyCode = KeyCode::new(0x08);
+    pub const TAB: KeyCode = KeyCode::new('\t' as u32);
+    pub const RETURN: KeyCode = KeyCode::new('\r' as u32);
+    pub const ESCAPE: KeyCode = KeyCode::new(0x1B);
+    pub const SPACE: KeyCode = KeyCode::new(' ' as u32);
+    pub const MINUS: KeyCode = KeyCode::new('-' as u32);
+    pub const SLASH: KeyCode = KeyCode::new('/' as u32);
+    pub const PRIOR: KeyCode = KeyCode::new(0x21);
+    pub const NEXT: KeyCode = KeyCode::new(0x22);
+
+    pub const END: KeyCode = KeyCode::new(0x23);
+    pub const HOME: KeyCode = KeyCode::new(0x24);
+
+    pub const LEFT: KeyCode = KeyCode::new(0x25);
+    pub const UP: KeyCode = KeyCode::new(0x26);
+    pub const RIGHT: KeyCode = KeyCode::new(0x27);
+    pub const DOWN: KeyCode = KeyCode::new(0x28);
+
+    pub const INSERT: KeyCode = KeyCode::new(0x2D);
+    pub const DELETE: KeyCode = KeyCode::new(0x2E);
+
+    pub const N0: KeyCode = KeyCode::new('0' as u32);
+    pub const N1: KeyCode = KeyCode::new('1' as u32);
+    pub const N2: KeyCode = KeyCode::new('2' as u32);
+    pub const N3: KeyCode = KeyCode::new('3' as u32);
+    pub const N4: KeyCode = KeyCode::new('4' as u32);
+    pub const N5: KeyCode = KeyCode::new('5' as u32);
+    pub const N6: KeyCode = KeyCode::new('6' as u32);
+    pub const N7: KeyCode = KeyCode::new('7' as u32);
+    pub const N8: KeyCode = KeyCode::new('8' as u32);
+    pub const N9: KeyCode = KeyCode::new('9' as u32);
+
+    pub const A: KeyCode = KeyCode::new('A' as u32);
+    pub const B: KeyCode = KeyCode::new('B' as u32);
+    pub const C: KeyCode = KeyCode::new('C' as u32);
+    pub const D: KeyCode = KeyCode::new('D' as u32);
+    pub const E: KeyCode = KeyCode::new('E' as u32);
+    pub const F: KeyCode = KeyCode::new('F' as u32);
+    pub const G: KeyCode = KeyCode::new('G' as u32);
+    pub const H: KeyCode = KeyCode::new('H' as u32);
+    pub const I: KeyCode = KeyCode::new('I' as u32);
+    pub const J: KeyCode = KeyCode::new('J' as u32);
+    pub const K: KeyCode = KeyCode::new('K' as u32);
+    pub const L: KeyCode = KeyCode::new('L' as u32);
+    pub const M: KeyCode = KeyCode::new('M' as u32);
+    pub const N: KeyCode = KeyCode::new('N' as u32);
+    pub const O: KeyCode = KeyCode::new('O' as u32);
+    pub const P: KeyCode = KeyCode::new('P' as u32);
+    pub const Q: KeyCode = KeyCode::new('Q' as u32);
+    pub const R: KeyCode = KeyCode::new('R' as u32);
+    pub const S: KeyCode = KeyCode::new('S' as u32);
+    pub const T: KeyCode = KeyCode::new('T' as u32);
+    pub const U: KeyCode = KeyCode::new('U' as u32);
+    pub const V: KeyCode = KeyCode::new('V' as u32);
+    pub const W: KeyCode = KeyCode::new('W' as u32);
+    pub const X: KeyCode = KeyCode::new('X' as u32);
+    pub const Y: KeyCode = KeyCode::new('Y' as u32);
+    pub const Z: KeyCode = KeyCode::new('Z' as u32);
 }
 
 /// Keyboard modifiers.
@@ -593,5 +690,24 @@ impl<'input> Stream<'_, '_, 'input> {
             modifiers |= kbmod::CTRL;
         }
         modifiers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_facade_roundtrips() {
+        let key = InputKey::from_parts(key::SLASH, kbmod::CTRL_SHIFT);
+        assert!(key.key_code() == key::SLASH);
+        assert!(key.modifiers() == kbmod::CTRL_SHIFT);
+    }
+
+    #[test]
+    fn typed_facade_bitor_builds_input_key() {
+        let key = key::A | kbmod::ALT;
+        assert!(key.key_code() == key::A);
+        assert!(key.modifiers() == kbmod::ALT);
     }
 }
