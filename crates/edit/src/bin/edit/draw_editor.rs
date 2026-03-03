@@ -2,17 +2,16 @@
 // Licensed under the MIT License.
 
 use std::num::ParseIntError;
+use std::path::PathBuf;
 
-use edit::buffer;
 use edit::framebuffer::IndexedColor;
 use edit::helpers::*;
-use edit::icu;
 use edit::input::{kbmod, vk};
 use edit::tui::*;
+use edit::{buffer, icu};
 
 use crate::localization::*;
 use crate::state::*;
-use std::path::PathBuf;
 
 pub fn draw_editor(ctx: &mut Context, state: &mut State) {
     if !matches!(state.wants_search.kind, StateSearchKind::Hidden | StateSearchKind::Disabled) {
@@ -30,8 +29,10 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
     if let Some(doc) = state.documents.active() {
         {
             let mut tb = doc.buffer.borrow_mut();
-            if !matches!(state.wants_search.kind, StateSearchKind::Hidden | StateSearchKind::Disabled)
-                && !state.search_needle.trim_ascii().is_empty()
+            if !matches!(
+                state.wants_search.kind,
+                StateSearchKind::Hidden | StateSearchKind::Disabled
+            ) && !state.search_needle.trim_ascii().is_empty()
             {
                 tb.set_search_highlight(&state.search_needle, state.search_options);
             } else {
@@ -215,7 +216,10 @@ pub fn search_execute(ctx: &mut Context, state: &mut State, action: SearchAction
     ctx.needs_rerender();
 }
 
-fn build_replace_preview(doc: &crate::documents::Document, state: &State) -> (Vec<ReplacePreviewItem>, String) {
+fn build_replace_preview(
+    doc: &crate::documents::Document,
+    state: &State,
+) -> (Vec<ReplacePreviewItem>, String) {
     let needle = state.search_needle.trim_ascii();
     if needle.is_empty() {
         return (Vec::new(), "No search text provided.".to_string());
@@ -274,7 +278,11 @@ fn build_replace_preview(doc: &crate::documents::Document, state: &State) -> (Ve
     (results, status)
 }
 
-fn preview_find_matches(line: &str, needle: &str, options: buffer::SearchOptions) -> Vec<std::ops::Range<usize>> {
+fn preview_find_matches(
+    line: &str,
+    needle: &str,
+    options: buffer::SearchOptions,
+) -> Vec<std::ops::Range<usize>> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -333,7 +341,11 @@ fn preview_is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn replace_line_with_matches(line: &str, matches: &[std::ops::Range<usize>], replacement: &str) -> String {
+fn replace_line_with_matches(
+    line: &str,
+    matches: &[std::ops::Range<usize>],
+    replacement: &str,
+) -> String {
     if matches.is_empty() {
         return line.to_string();
     }

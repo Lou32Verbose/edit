@@ -453,8 +453,6 @@ impl Framebuffer {
             let back_fg = unsafe { back_fgs.next().unwrap_unchecked() };
             let back_attr = unsafe { back_attrs.next().unwrap_unchecked() };
 
-            // TODO: Ideally, we should properly diff the contents and so if
-            // only parts of a line change, we should only update those parts.
             if front_line == back_line
                 && front_bg == back_bg
                 && front_fg == back_fg
@@ -465,22 +463,47 @@ impl Framebuffer {
 
             let line_bytes = back_line.as_bytes();
             let mut cfg = MeasurementConfig::new(&line_bytes);
-            let mut chunk_end = 0;
+            let line_equal = front_line == back_line;
+            let mut render_beg = 0usize;
+            let mut render_end = back_bg.len();
+
+            // If only style/attribute spans changed, we can redraw just the changed
+            // visual-cell range instead of repainting the full line.
+            if line_equal {
+                while render_beg < render_end
+                    && front_bg[render_beg] == back_bg[render_beg]
+                    && front_fg[render_beg] == back_fg[render_beg]
+                    && front_attr[render_beg] == back_attr[render_beg]
+                {
+                    render_beg += 1;
+                }
+
+                while render_end > render_beg
+                    && front_bg[render_end - 1] == back_bg[render_end - 1]
+                    && front_fg[render_end - 1] == back_fg[render_end - 1]
+                    && front_attr[render_end - 1] == back_attr[render_end - 1]
+                {
+                    render_end -= 1;
+                }
+            }
+
+            let mut chunk_end = render_beg;
 
             if result.is_empty() {
                 result.push_str("\x1b[m");
             }
-            _ = write!(result, "\x1b[{};1H", y + 1);
+            _ = write!(result, "\x1b[{};{}H", y + 1, render_beg + 1);
 
             while {
-                let bg = back_bg[chunk_end];
-                let fg = back_fg[chunk_end];
-                let attr = back_attr[chunk_end];
+                let chunk_beg = chunk_end;
+                let bg = back_bg[chunk_beg];
+                let fg = back_fg[chunk_beg];
+                let attr = back_attr[chunk_beg];
 
                 // Chunk into runs of the same color.
                 while {
                     chunk_end += 1;
-                    chunk_end < back_bg.len()
+                    chunk_end < render_end
                         && back_bg[chunk_end] == bg
                         && back_fg[chunk_end] == fg
                         && back_attr[chunk_end] == attr
@@ -515,11 +538,11 @@ impl Framebuffer {
                     last_attr = attr;
                 }
 
-                let beg = cfg.cursor().offset;
+                let beg = cfg.goto_visual(Point { x: chunk_beg as CoordType, y: 0 }).offset;
                 let end = cfg.goto_visual(Point { x: chunk_end as CoordType, y: 0 }).offset;
                 result.push_str(&back_line[beg..end]);
 
-                chunk_end < back_bg.len()
+                chunk_end < render_end
             } {}
         }
 

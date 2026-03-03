@@ -1,15 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::env;
 use std::path::PathBuf;
-use std::{fs, io};
+use std::{env, fs, io};
 
-use edit::apperr;
-use edit::framebuffer;
 use edit::helpers::CoordType;
-use edit::input::{kbmod, vk, InputKey};
+use edit::input::{InputKey, kbmod, vk};
 use edit::oklab::StraightRgba;
+use edit::{apperr, framebuffer};
 
 use crate::commands::CommandId;
 
@@ -183,16 +181,18 @@ pub fn load_config() -> Config {
     cfg
 }
 
-pub fn ensure_config_file() -> Option<PathBuf> {
-    let path = config_path()?;
+pub fn ensure_config_file() -> apperr::Result<Option<PathBuf>> {
+    let Some(path) = config_path() else {
+        return Ok(None);
+    };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
     if !path.exists() {
         let default = default_config_text();
-        let _ = std::fs::write(&path, default);
+        std::fs::write(&path, default)?;
     }
-    Some(path)
+    Ok(Some(path))
 }
 
 pub fn persist_theme(theme: ThemeId) -> apperr::Result<()> {
@@ -285,11 +285,7 @@ pub fn persist_recents(files: &[PathBuf], folders: &[PathBuf]) -> apperr::Result
 }
 
 fn join_recent_list(items: &[PathBuf]) -> String {
-    items
-        .iter()
-        .map(|p| p.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(";")
+    items.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(";")
 }
 
 pub fn persist_keybindings(keybindings: &Keybindings) -> apperr::Result<()> {
@@ -697,12 +693,7 @@ fn parse_hex_color(value: &str) -> Option<StraightRgba> {
 }
 
 fn parse_recent_list(value: &str) -> Vec<PathBuf> {
-    value
-        .split(';')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .collect()
+    value.split(';').map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from).collect()
 }
 
 fn parse_key_token(token: &str) -> Option<InputKey> {
@@ -790,7 +781,10 @@ pub fn apply_settings_to_document(settings: &EditorSettings, doc: &crate::docume
     tb.set_indent_with_tabs(settings.indent_with_tabs);
 }
 
-pub fn apply_settings_to_all(settings: &EditorSettings, documents: &crate::documents::DocumentManager) {
+pub fn apply_settings_to_all(
+    settings: &EditorSettings,
+    documents: &crate::documents::DocumentManager,
+) {
     for doc in documents.iter() {
         apply_settings_to_document(settings, doc);
     }

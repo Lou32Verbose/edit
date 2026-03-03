@@ -2,11 +2,11 @@
 // Licensed under the MIT License.
 
 use edit::buffer::MoveLineDirection;
-use edit::input::{kbmod, vk, InputKey};
+use edit::input::{InputKey, kbmod, vk};
 use edit::tui::Context;
 
 use crate::config;
-use crate::localization::{loc, LocId};
+use crate::localization::{LocId, loc};
 use crate::state::{State, StateFilePicker, StateSearchKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -108,78 +108,438 @@ pub struct Command {
 pub fn command_list() -> Vec<Command> {
     use CommandId::*;
     vec![
-        Command { id: FileNew, label: loc(LocId::FileNew), requires_document: false, show_in_palette: true },
-        Command { id: FileOpen, label: loc(LocId::FileOpen), requires_document: false, show_in_palette: true },
-        Command { id: FileOpenFolder, label: "Open Folder", requires_document: false, show_in_palette: true },
-        Command { id: FileOpenRecent, label: "Open Recent", requires_document: false, show_in_palette: true },
-        Command { id: FileOpenRecentFolder, label: "Open Recent Folder", requires_document: false, show_in_palette: true },
-        Command { id: FileSave, label: loc(LocId::FileSave), requires_document: true, show_in_palette: true },
-        Command { id: FileSaveAs, label: loc(LocId::FileSaveAs), requires_document: true, show_in_palette: true },
-        Command { id: FileClose, label: loc(LocId::FileClose), requires_document: true, show_in_palette: true },
-        Command { id: FileExit, label: loc(LocId::FileExit), requires_document: false, show_in_palette: true },
-        Command { id: EditUndo, label: loc(LocId::EditUndo), requires_document: true, show_in_palette: true },
-        Command { id: EditRedo, label: loc(LocId::EditRedo), requires_document: true, show_in_palette: true },
-        Command { id: EditCut, label: loc(LocId::EditCut), requires_document: true, show_in_palette: true },
-        Command { id: EditCopy, label: loc(LocId::EditCopy), requires_document: true, show_in_palette: true },
-        Command { id: EditPaste, label: loc(LocId::EditPaste), requires_document: true, show_in_palette: true },
-        Command { id: EditFind, label: loc(LocId::EditFind), requires_document: true, show_in_palette: true },
-        Command { id: EditReplace, label: loc(LocId::EditReplace), requires_document: true, show_in_palette: true },
-        Command { id: EditSelectAll, label: loc(LocId::EditSelectAll), requires_document: true, show_in_palette: true },
-        Command { id: EditSelectLine, label: "Select Line", requires_document: true, show_in_palette: true },
-        Command { id: EditDuplicateLine, label: "Duplicate Line", requires_document: true, show_in_palette: true },
-        Command { id: EditDeleteLine, label: "Delete Line", requires_document: true, show_in_palette: true },
-        Command { id: EditJoinLines, label: "Join Lines", requires_document: true, show_in_palette: true },
-        Command { id: EditAddCursorAbove, label: "Add Cursor Above", requires_document: true, show_in_palette: true },
-        Command { id: EditAddCursorBelow, label: "Add Cursor Below", requires_document: true, show_in_palette: true },
-        Command { id: EditAddNextOccurrence, label: "Add Selection to Next Find Match", requires_document: true, show_in_palette: true },
-        Command { id: EditCollapseCursors, label: "Collapse Cursors to Single", requires_document: true, show_in_palette: true },
-        Command { id: EditSortLinesAsc, label: "Sort Lines (Ascending)", requires_document: true, show_in_palette: true },
-        Command { id: EditSortLinesDesc, label: "Sort Lines (Descending)", requires_document: true, show_in_palette: true },
-        Command { id: EditRemoveDuplicateLines, label: "Remove Duplicate Lines", requires_document: true, show_in_palette: true },
-        Command { id: EditRemoveEmptyLines, label: "Remove Empty Lines", requires_document: true, show_in_palette: true },
-        Command { id: EditTrimWhitespace, label: "Trim Trailing Whitespace", requires_document: true, show_in_palette: true },
-        Command { id: EditMoveLineUp, label: "Move Line Up", requires_document: true, show_in_palette: true },
-        Command { id: EditMoveLineDown, label: "Move Line Down", requires_document: true, show_in_palette: true },
-        Command { id: EditToggleLineComment, label: "Toggle Line Comment", requires_document: true, show_in_palette: true },
-        Command { id: EditToggleBlockComment, label: "Toggle Block Comment", requires_document: true, show_in_palette: true },
-        Command { id: EditGotoMatchingBracket, label: "Go to Matching Bracket", requires_document: true, show_in_palette: true },
-        Command { id: EditEncodeBase64, label: "Encode Base64", requires_document: true, show_in_palette: true },
-        Command { id: EditDecodeBase64, label: "Decode Base64", requires_document: true, show_in_palette: true },
-        Command { id: EditEncodeUrl, label: "URL Encode", requires_document: true, show_in_palette: true },
-        Command { id: EditDecodeUrl, label: "URL Decode", requires_document: true, show_in_palette: true },
-        Command { id: EditEncodeHex, label: "Encode Hex", requires_document: true, show_in_palette: true },
-        Command { id: EditDecodeHex, label: "Decode Hex", requires_document: true, show_in_palette: true },
-        Command { id: EditConvertUppercase, label: "Convert to Uppercase", requires_document: true, show_in_palette: true },
-        Command { id: EditConvertLowercase, label: "Convert to Lowercase", requires_document: true, show_in_palette: true },
-        Command { id: EditConvertTitleCase, label: "Convert to Title Case", requires_document: true, show_in_palette: true },
-        Command { id: FindInFiles, label: "Find in Files", requires_document: false, show_in_palette: true },
-        Command { id: ViewWordWrap, label: loc(LocId::ViewWordWrap), requires_document: true, show_in_palette: true },
-        Command { id: ViewShowWhitespace, label: "Show Whitespace", requires_document: true, show_in_palette: true },
-        Command { id: ViewGoToFile, label: loc(LocId::ViewGoToFile), requires_document: true, show_in_palette: true },
-        Command { id: FileGoto, label: loc(LocId::FileGoto), requires_document: true, show_in_palette: true },
-        Command { id: HelpAbout, label: loc(LocId::HelpAbout), requires_document: false, show_in_palette: true },
-        Command { id: HelpContext, label: "Help: Context", requires_document: false, show_in_palette: true },
-        Command { id: HelpQuickStart, label: "Help: Quick Start", requires_document: false, show_in_palette: true },
-        Command { id: QuickSwitcher, label: "Quick Switcher", requires_document: false, show_in_palette: true },
-        Command { id: ThemePicker, label: "Themes: Theme Picker", requires_document: false, show_in_palette: true },
-        Command { id: SettingsOpenConfig, label: "Settings: Open Config", requires_document: false, show_in_palette: true },
-        Command { id: SettingsReload, label: "Settings: Reload Config", requires_document: false, show_in_palette: true },
-        Command { id: SettingsToggleHighContrast, label: "Settings: Toggle High Contrast", requires_document: false, show_in_palette: true },
-        Command { id: SettingsEditKeybindings, label: "Settings: Edit Keybindings", requires_document: false, show_in_palette: true },
-        Command { id: SettingsThemeTerminal, label: "Theme: Terminal", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeNord, label: "Theme: Nord", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeOneDark, label: "Theme: One Dark", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeGruvbox, label: "Theme: Gruvbox", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeMonokai, label: "Theme: Monokai", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeSolarizedDark, label: "Theme: Solarized Dark", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeSolarizedLight, label: "Theme: Solarized Light", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeDracula, label: "Theme: Dracula", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeTokyoNight, label: "Theme: Tokyo Night", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeMidnight, label: "Theme: Midnight", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemePaperwhite, label: "Theme: Paperwhite", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeCustom, label: "Theme: Custom", requires_document: false, show_in_palette: false },
-        Command { id: SettingsThemeCycle, label: "Theme: Cycle", requires_document: false, show_in_palette: true },
-        Command { id: SettingsThemePrevious, label: "Theme: Previous", requires_document: false, show_in_palette: true },
+        Command {
+            id: FileNew,
+            label: loc(LocId::FileNew),
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileOpen,
+            label: loc(LocId::FileOpen),
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileOpenFolder,
+            label: "Open Folder",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileOpenRecent,
+            label: "Open Recent",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileOpenRecentFolder,
+            label: "Open Recent Folder",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileSave,
+            label: loc(LocId::FileSave),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileSaveAs,
+            label: loc(LocId::FileSaveAs),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileClose,
+            label: loc(LocId::FileClose),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileExit,
+            label: loc(LocId::FileExit),
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditUndo,
+            label: loc(LocId::EditUndo),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditRedo,
+            label: loc(LocId::EditRedo),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditCut,
+            label: loc(LocId::EditCut),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditCopy,
+            label: loc(LocId::EditCopy),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditPaste,
+            label: loc(LocId::EditPaste),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditFind,
+            label: loc(LocId::EditFind),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditReplace,
+            label: loc(LocId::EditReplace),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditSelectAll,
+            label: loc(LocId::EditSelectAll),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditSelectLine,
+            label: "Select Line",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditDuplicateLine,
+            label: "Duplicate Line",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditDeleteLine,
+            label: "Delete Line",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditJoinLines,
+            label: "Join Lines",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditAddCursorAbove,
+            label: "Add Cursor Above",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditAddCursorBelow,
+            label: "Add Cursor Below",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditAddNextOccurrence,
+            label: "Add Selection to Next Find Match",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditCollapseCursors,
+            label: "Collapse Cursors to Single",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditSortLinesAsc,
+            label: "Sort Lines (Ascending)",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditSortLinesDesc,
+            label: "Sort Lines (Descending)",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditRemoveDuplicateLines,
+            label: "Remove Duplicate Lines",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditRemoveEmptyLines,
+            label: "Remove Empty Lines",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditTrimWhitespace,
+            label: "Trim Trailing Whitespace",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditMoveLineUp,
+            label: "Move Line Up",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditMoveLineDown,
+            label: "Move Line Down",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditToggleLineComment,
+            label: "Toggle Line Comment",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditToggleBlockComment,
+            label: "Toggle Block Comment",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditGotoMatchingBracket,
+            label: "Go to Matching Bracket",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditEncodeBase64,
+            label: "Encode Base64",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditDecodeBase64,
+            label: "Decode Base64",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditEncodeUrl,
+            label: "URL Encode",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditDecodeUrl,
+            label: "URL Decode",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditEncodeHex,
+            label: "Encode Hex",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditDecodeHex,
+            label: "Decode Hex",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditConvertUppercase,
+            label: "Convert to Uppercase",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditConvertLowercase,
+            label: "Convert to Lowercase",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: EditConvertTitleCase,
+            label: "Convert to Title Case",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: FindInFiles,
+            label: "Find in Files",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: ViewWordWrap,
+            label: loc(LocId::ViewWordWrap),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: ViewShowWhitespace,
+            label: "Show Whitespace",
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: ViewGoToFile,
+            label: loc(LocId::ViewGoToFile),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: FileGoto,
+            label: loc(LocId::FileGoto),
+            requires_document: true,
+            show_in_palette: true,
+        },
+        Command {
+            id: HelpAbout,
+            label: loc(LocId::HelpAbout),
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: HelpContext,
+            label: "Help: Context",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: HelpQuickStart,
+            label: "Help: Quick Start",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: QuickSwitcher,
+            label: "Quick Switcher",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: ThemePicker,
+            label: "Themes: Theme Picker",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: SettingsOpenConfig,
+            label: "Settings: Open Config",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: SettingsReload,
+            label: "Settings: Reload Config",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: SettingsToggleHighContrast,
+            label: "Settings: Toggle High Contrast",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: SettingsEditKeybindings,
+            label: "Settings: Edit Keybindings",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: SettingsThemeTerminal,
+            label: "Theme: Terminal",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeNord,
+            label: "Theme: Nord",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeOneDark,
+            label: "Theme: One Dark",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeGruvbox,
+            label: "Theme: Gruvbox",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeMonokai,
+            label: "Theme: Monokai",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeSolarizedDark,
+            label: "Theme: Solarized Dark",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeSolarizedLight,
+            label: "Theme: Solarized Light",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeDracula,
+            label: "Theme: Dracula",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeTokyoNight,
+            label: "Theme: Tokyo Night",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeMidnight,
+            label: "Theme: Midnight",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemePaperwhite,
+            label: "Theme: Paperwhite",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeCustom,
+            label: "Theme: Custom",
+            requires_document: false,
+            show_in_palette: false,
+        },
+        Command {
+            id: SettingsThemeCycle,
+            label: "Theme: Cycle",
+            requires_document: false,
+            show_in_palette: true,
+        },
+        Command {
+            id: SettingsThemePrevious,
+            label: "Theme: Previous",
+            requires_document: false,
+            show_in_palette: true,
+        },
     ]
 }
 
@@ -528,15 +888,15 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
             state.wants_quick_switcher = true;
             state.quick_switcher_selected = 0;
         }
-        SettingsOpenConfig => {
-            if let Some(path) = config::ensure_config_file() {
-                match state.documents.add_file_path(&path, &state.settings) {
-                    Ok(crate::documents::OpenOutcome::Opened) => {}
-                    Ok(crate::documents::OpenOutcome::BinaryDetected { .. }) => {}
-                    Err(err) => crate::state::error_log_add(ctx, state, err),
-                }
-            }
-        }
+        SettingsOpenConfig => match config::ensure_config_file() {
+            Ok(Some(path)) => match state.documents.add_file_path(&path, &state.settings) {
+                Ok(crate::documents::OpenOutcome::Opened) => {}
+                Ok(crate::documents::OpenOutcome::BinaryDetected { .. }) => {}
+                Err(err) => crate::state::error_log_add(ctx, state, err),
+            },
+            Ok(None) => {}
+            Err(err) => crate::state::error_log_add(ctx, state, err),
+        },
         SettingsReload => {
             state.reload_config();
             ctx.needs_rerender();
@@ -658,7 +1018,10 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         | CommandId::EditConvertLowercase
         | CommandId::EditConvertTitleCase
         | CommandId::FindInFiles => Edit,
-        CommandId::ViewWordWrap | CommandId::ViewShowWhitespace | CommandId::ViewGoToFile | CommandId::FileGoto => View,
+        CommandId::ViewWordWrap
+        | CommandId::ViewShowWhitespace
+        | CommandId::ViewGoToFile
+        | CommandId::FileGoto => View,
         CommandId::HelpAbout | CommandId::HelpContext | CommandId::HelpQuickStart => Help,
         CommandId::ThemePicker
         | CommandId::SettingsThemeCycle
@@ -678,8 +1041,7 @@ pub fn command_group(id: CommandId) -> CommandGroup {
         | CommandId::SettingsThemeTokyoNight
         | CommandId::SettingsThemeMidnight
         | CommandId::SettingsThemePaperwhite
-        | CommandId::SettingsThemeCustom
-        => Settings,
+        | CommandId::SettingsThemeCustom => Settings,
         CommandId::CommandPalette | CommandId::QuickSwitcher => Other,
     }
 }

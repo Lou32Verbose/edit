@@ -491,10 +491,7 @@ impl TextBuffer {
             return;
         }
 
-        self.search_highlight = Some(SearchHighlight {
-            needle: needle.to_string(),
-            options,
-        });
+        self.search_highlight = Some(SearchHighlight { needle: needle.to_string(), options });
     }
 
     pub fn clear_search_highlight(&mut self) {
@@ -1321,10 +1318,7 @@ impl TextBuffer {
             }
         }
 
-        self.secondary_cursors.push(SecondaryCursor {
-            cursor: new_cursor,
-            selection: None,
-        });
+        self.secondary_cursors.push(SecondaryCursor { cursor: new_cursor, selection: None });
         self.normalize_cursors();
     }
 
@@ -1342,10 +1336,7 @@ impl TextBuffer {
             }
         }
 
-        self.secondary_cursors.push(SecondaryCursor {
-            cursor: new_cursor,
-            selection: None,
-        });
+        self.secondary_cursors.push(SecondaryCursor { cursor: new_cursor, selection: None });
         self.normalize_cursors();
     }
 
@@ -1395,7 +1386,8 @@ impl TextBuffer {
         // Search forward from end of selection
         if let Some(found_offset) = self.find_next_occurrence(&selected_text, search_start) {
             let found_beg = self.cursor_move_to_offset_internal(self.cursor, found_offset);
-            let found_end = self.cursor_move_to_offset_internal(found_beg, found_offset + selected_text.len());
+            let found_end =
+                self.cursor_move_to_offset_internal(found_beg, found_offset + selected_text.len());
 
             // Add as secondary cursor with selection
             self.secondary_cursors.push(SecondaryCursor {
@@ -1412,7 +1404,10 @@ impl TextBuffer {
                 // Only add if it's before our original selection
                 if found_offset < beg.offset {
                     let found_beg = self.cursor_move_to_offset_internal(self.cursor, found_offset);
-                    let found_end = self.cursor_move_to_offset_internal(found_beg, found_offset + selected_text.len());
+                    let found_end = self.cursor_move_to_offset_internal(
+                        found_beg,
+                        found_offset + selected_text.len(),
+                    );
 
                     self.secondary_cursors.push(SecondaryCursor {
                         cursor: found_end,
@@ -1571,16 +1566,12 @@ impl TextBuffer {
 
         // Create a cursor for each line in the block
         for visual_y in top..=bottom {
-            let cursor = self.cursor_move_to_visual_internal(
-                self.cursor,
-                Point { x: left, y: visual_y },
-            );
+            let cursor =
+                self.cursor_move_to_visual_internal(self.cursor, Point { x: left, y: visual_y });
 
             // Calculate selection end for this line
-            let cursor_end = self.cursor_move_to_visual_internal(
-                cursor,
-                Point { x: right, y: visual_y },
-            );
+            let cursor_end =
+                self.cursor_move_to_visual_internal(cursor, Point { x: right, y: visual_y });
 
             if visual_y == self.cursor.visual_pos.y {
                 // This is the primary cursor's line
@@ -1604,10 +1595,7 @@ impl TextBuffer {
                     None
                 };
 
-                self.secondary_cursors.push(SecondaryCursor {
-                    cursor: cursor_end,
-                    selection,
-                });
+                self.secondary_cursors.push(SecondaryCursor { cursor: cursor_end, selection });
             }
         }
 
@@ -2212,7 +2200,8 @@ impl TextBuffer {
         // Move all secondary cursors
         for i in 0..self.secondary_cursors.len() {
             let cursor = self.secondary_cursors[i].cursor;
-            self.secondary_cursors[i].cursor = self.cursor_move_delta_internal(cursor, granularity, delta);
+            self.secondary_cursors[i].cursor =
+                self.cursor_move_delta_internal(cursor, granularity, delta);
             self.secondary_cursors[i].selection = None; // Clear selection when moving without shift
         }
         self.normalize_cursors();
@@ -2236,13 +2225,11 @@ impl TextBuffer {
             };
 
             let cursor = self.secondary_cursors[i].cursor;
-            self.secondary_cursors[i].cursor = self.cursor_move_delta_internal(cursor, granularity, delta);
+            self.secondary_cursors[i].cursor =
+                self.cursor_move_delta_internal(cursor, granularity, delta);
             let end = self.secondary_cursors[i].cursor.logical_pos;
-            self.secondary_cursors[i].selection = if beg == end {
-                None
-            } else {
-                Some(TextBufferSelection { beg, end })
-            };
+            self.secondary_cursors[i].selection =
+                if beg == end { None } else { Some(TextBufferSelection { beg, end }) };
         }
         self.normalize_cursors();
     }
@@ -2327,9 +2314,11 @@ impl TextBuffer {
         let block_bounds = self.block_selection_bounds();
 
         // Find matching bracket for highlighting (if cursor is on a bracket)
-        let matching_bracket_offset = if focused { self.find_matching_bracket_offset() } else { None };
+        let matching_bracket_offset =
+            if focused { self.find_matching_bracket_offset() } else { None };
         // Also highlight the bracket under cursor if there's a match
-        let cursor_bracket_offset = if matching_bracket_offset.is_some() { Some(self.cursor.offset) } else { None };
+        let cursor_bracket_offset =
+            if matching_bracket_offset.is_some() { Some(self.cursor.offset) } else { None };
 
         line.reserve(width as usize * 2);
 
@@ -2405,11 +2394,9 @@ impl TextBuffer {
                         bottom: top + 1,
                     };
 
-                    let mut bg = fb.indexed(IndexedColor::Foreground).oklab_blend(fb.indexed_alpha(
-                        IndexedColor::BrightBlue,
-                        1,
-                        2,
-                    ));
+                    let mut bg = fb
+                        .indexed(IndexedColor::Foreground)
+                        .oklab_blend(fb.indexed_alpha(IndexedColor::BrightBlue, 1, 2));
                     if !focused {
                         bg = bg.oklab_blend(fb.indexed_alpha(IndexedColor::Background, 1, 2));
                     };
@@ -2592,10 +2579,8 @@ impl TextBuffer {
                         let color = fb.indexed_alpha(IndexedColor::BrightYellow, 1, 3);
 
                         for range in matches {
-                            let left =
-                                base_left + count_columns(content, range.start) as CoordType;
-                            let right =
-                                base_left + count_columns(content, range.end) as CoordType;
+                            let left = base_left + count_columns(content, range.start) as CoordType;
+                            let right = base_left + count_columns(content, range.end) as CoordType;
                             if left < right {
                                 fb.blend_bg(Rect { left, top, right, bottom: top + 1 }, color);
                             }
@@ -2649,7 +2634,9 @@ impl TextBuffer {
             }
 
             // Highlight matching bracket pair if on this line
-            for bracket_off in [matching_bracket_offset, cursor_bracket_offset].into_iter().flatten() {
+            for bracket_off in
+                [matching_bracket_offset, cursor_bracket_offset].into_iter().flatten()
+            {
                 if bracket_off >= cursor_beg.offset && bracket_off < cursor_end.offset {
                     // Calculate visual column for the bracket
                     let content = line.get(content_byte_start..).unwrap_or("");
@@ -2663,11 +2650,7 @@ impl TextBuffer {
                             break;
                         }
                         byte_pos += ch.len_utf8();
-                        col += if ch == '\t' {
-                            self.tab_size - (col % self.tab_size)
-                        } else {
-                            1
-                        };
+                        col += if ch == '\t' { self.tab_size - (col % self.tab_size) } else { 1 };
                     }
 
                     let left = destination.left + self.margin_width + col;
@@ -3329,8 +3312,10 @@ impl TextBuffer {
         };
 
         // Move to start of first line and get the content
-        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
-        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+        let start_cursor =
+            self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor =
+            self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
 
         // Extract the lines
         let mut content = Vec::new();
@@ -3360,7 +3345,8 @@ impl TextBuffer {
 
         // Select the entire line
         let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
-        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: y + 1 });
+        let end_cursor =
+            self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: y + 1 });
 
         if start_cursor.offset < end_cursor.offset {
             self.edit_begin(HistoryType::Delete, start_cursor);
@@ -3392,16 +3378,12 @@ impl TextBuffer {
         // Work from end to beginning to avoid offset issues
         for y in (beg_y..end_y).rev() {
             // Find the end of line y (position before newline)
-            let line_end = self.cursor_move_to_logical_internal(
-                self.cursor,
-                Point { x: CoordType::MAX, y },
-            );
+            let line_end =
+                self.cursor_move_to_logical_internal(self.cursor, Point { x: CoordType::MAX, y });
 
             // Find start of next line
-            let next_line_start = self.cursor_move_to_logical_internal(
-                line_end,
-                Point { x: 0, y: y + 1 },
-            );
+            let next_line_start =
+                self.cursor_move_to_logical_internal(line_end, Point { x: 0, y: y + 1 });
 
             // Delete newline and leading whitespace, replace with single space
             if line_end.offset < next_line_start.offset {
@@ -3450,8 +3432,10 @@ impl TextBuffer {
         }
 
         // Get offsets for the lines
-        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
-        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+        let start_cursor =
+            self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor =
+            self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
 
         // Extract the content
         let mut content = Vec::new();
@@ -3507,8 +3491,10 @@ impl TextBuffer {
         }
 
         // Get offsets for the lines
-        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
-        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+        let start_cursor =
+            self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor =
+            self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
 
         // Extract the content
         let mut content = Vec::new();
@@ -3517,10 +3503,8 @@ impl TextBuffer {
         // Split into lines and remove duplicates (preserving order)
         let content_str = String::from_utf8_lossy(&content);
         let mut seen = std::collections::HashSet::new();
-        let unique_lines: Vec<&str> = content_str
-            .lines()
-            .filter(|line| seen.insert(*line))
-            .collect();
+        let unique_lines: Vec<&str> =
+            content_str.lines().filter(|line| seen.insert(*line)).collect();
 
         // If no duplicates were removed, do nothing
         if unique_lines.len() == content_str.lines().count() {
@@ -3568,8 +3552,10 @@ impl TextBuffer {
         }
 
         // Get offsets for the lines
-        let start_cursor = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
-        let end_cursor = self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
+        let start_cursor =
+            self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y: beg_y });
+        let end_cursor =
+            self.cursor_move_to_logical_internal(start_cursor, Point { x: 0, y: end_y + 1 });
 
         // Extract the content
         let mut content = Vec::new();
@@ -3577,10 +3563,8 @@ impl TextBuffer {
 
         // Split into lines and filter out empty ones
         let content_str = String::from_utf8_lossy(&content);
-        let non_empty_lines: Vec<&str> = content_str
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect();
+        let non_empty_lines: Vec<&str> =
+            content_str.lines().filter(|line| !line.trim().is_empty()).collect();
 
         // If no empty lines were removed, do nothing
         if non_empty_lines.len() == content_str.lines().count() {
@@ -3611,7 +3595,8 @@ impl TextBuffer {
         self.edit_end_grouping();
 
         // Restore cursor position (clamped to new bounds)
-        let new_y = cursor.logical_pos.y.min(beg_y + non_empty_lines.len().saturating_sub(1) as CoordType);
+        let new_y =
+            cursor.logical_pos.y.min(beg_y + non_empty_lines.len().saturating_sub(1) as CoordType);
         self.cursor_move_to_logical(Point { x: cursor.logical_pos.x, y: new_y });
         self.set_selection(None);
     }
@@ -3623,14 +3608,9 @@ impl TextBuffer {
         // Work backwards from last line to first
         for y in (0..self.stats.logical_lines).rev() {
             // Find end of line content (before any trailing whitespace)
-            let line_start = self.cursor_move_to_logical_internal(
-                self.cursor,
-                Point { x: 0, y },
-            );
-            let line_end = self.cursor_move_to_logical_internal(
-                line_start,
-                Point { x: CoordType::MAX, y },
-            );
+            let line_start = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
+            let line_end =
+                self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
 
             // Read backwards from line_end to find trailing whitespace
             if line_start.offset >= line_end.offset {
@@ -3641,7 +3621,8 @@ impl TextBuffer {
             self.buffer.extract_raw(line_start.offset..line_end.offset, &mut content, 0);
 
             // Find where trailing whitespace starts
-            let trimmed_len = content.iter().rposition(|&b| b != b' ' && b != b'\t').map(|i| i + 1).unwrap_or(0);
+            let trimmed_len =
+                content.iter().rposition(|&b| b != b' ' && b != b'\t').map(|i| i + 1).unwrap_or(0);
 
             if trimmed_len < content.len() {
                 // There's trailing whitespace to remove
@@ -3660,13 +3641,26 @@ impl TextBuffer {
     /// Gets the line comment prefix for the current language.
     fn line_comment_prefix(&self) -> Option<&'static str> {
         match self.language {
-            Language::Rust | Language::C | Language::Cpp | Language::CSharp
-            | Language::Go | Language::Java | Language::JavaScript
-            | Language::TypeScript | Language::Swift | Language::Kotlin
-            | Language::Dart | Language::Scala => Some("//"),
-            Language::Python | Language::Ruby | Language::Shell
-            | Language::Yaml | Language::Toml | Language::Ini
-            | Language::R | Language::Perl => Some("#"),
+            Language::Rust
+            | Language::C
+            | Language::Cpp
+            | Language::CSharp
+            | Language::Go
+            | Language::Java
+            | Language::JavaScript
+            | Language::TypeScript
+            | Language::Swift
+            | Language::Kotlin
+            | Language::Dart
+            | Language::Scala => Some("//"),
+            Language::Python
+            | Language::Ruby
+            | Language::Shell
+            | Language::Yaml
+            | Language::Toml
+            | Language::Ini
+            | Language::R
+            | Language::Perl => Some("#"),
             Language::Sql | Language::Lua | Language::Haskell => Some("--"),
             Language::Latex => Some("%"),
             Language::Clojure => Some(";"),
@@ -3678,10 +3672,20 @@ impl TextBuffer {
     /// Gets the block comment delimiters for the current language.
     fn block_comment_delimiters(&self) -> Option<(&'static str, &'static str)> {
         match self.language {
-            Language::C | Language::Cpp | Language::CSharp | Language::Java
-            | Language::JavaScript | Language::TypeScript | Language::Go
-            | Language::Rust | Language::Swift | Language::Kotlin | Language::Css
-            | Language::Dart | Language::Scala | Language::Php => Some(("/*", "*/")),
+            Language::C
+            | Language::Cpp
+            | Language::CSharp
+            | Language::Java
+            | Language::JavaScript
+            | Language::TypeScript
+            | Language::Go
+            | Language::Rust
+            | Language::Swift
+            | Language::Kotlin
+            | Language::Css
+            | Language::Dart
+            | Language::Scala
+            | Language::Php => Some(("/*", "*/")),
             Language::Html | Language::Xml => Some(("<!--", "-->")),
             Language::Lua => Some(("--[[", "]]")),
             Language::Haskell => Some(("{-", "-}")),
@@ -3709,13 +3713,15 @@ impl TextBuffer {
         let mut all_commented = true;
         for y in beg_y..=end_y {
             let line_start = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
-            let line_end = self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
+            let line_end =
+                self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
 
             let mut content = Vec::new();
             self.buffer.extract_raw(line_start.offset..line_end.offset, &mut content, 0);
 
             // Skip leading whitespace
-            let trimmed = content.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(content.len());
+            let trimmed =
+                content.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(content.len());
             if !content[trimmed..].starts_with(prefix_bytes) {
                 all_commented = false;
                 break;
@@ -3727,12 +3733,14 @@ impl TextBuffer {
         // Process lines in reverse order to preserve offsets
         for y in (beg_y..=end_y).rev() {
             let line_start = self.cursor_move_to_logical_internal(self.cursor, Point { x: 0, y });
-            let line_end = self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
+            let line_end =
+                self.cursor_move_to_logical_internal(line_start, Point { x: CoordType::MAX, y });
 
             let mut content = Vec::new();
             self.buffer.extract_raw(line_start.offset..line_end.offset, &mut content, 0);
 
-            let ws_len = content.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(content.len());
+            let ws_len =
+                content.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(content.len());
 
             if all_commented {
                 // Remove comment prefix (and optional space after it)
@@ -4527,10 +4535,8 @@ impl TextBuffer {
                 }
 
                 // Comment (# or ;)
-                let comment_start = trimmed
-                    .find('#')
-                    .or_else(|| trimmed.find(';'))
-                    .map(|p| indent + p);
+                let comment_start =
+                    trimmed.find('#').or_else(|| trimmed.find(';')).map(|p| indent + p);
 
                 if let Some(cs) = comment_start {
                     spans.push(HighlightSpan {
@@ -4567,7 +4573,10 @@ impl TextBuffer {
                     // Check for keywords in value
                     let value_trimmed = value_part.trim();
                     let value_lower = value_trimmed.to_ascii_lowercase();
-                    if matches!(value_lower.as_str(), "true" | "false" | "on" | "off" | "yes" | "no") {
+                    if matches!(
+                        value_lower.as_str(),
+                        "true" | "false" | "on" | "off" | "yes" | "no"
+                    ) {
                         let kw_start = value_start + value_part.find(value_trimmed).unwrap_or(0);
                         spans.push(HighlightSpan {
                             start: kw_start,
@@ -4703,7 +4712,8 @@ impl TextBuffer {
                         // Keywords
                         let value_trimmed = value_part.trim();
                         if matches!(value_trimmed, "true" | "false" | "null" | "~") {
-                            let kw_start = value_start + value_part.find(value_trimmed).unwrap_or(0);
+                            let kw_start =
+                                value_start + value_part.find(value_trimmed).unwrap_or(0);
                             spans.push(HighlightSpan {
                                 start: kw_start,
                                 end: kw_start + value_trimmed.len(),
@@ -4958,10 +4968,10 @@ impl TextBuffer {
 
                 let keywords = match language {
                     Language::Rust => &[
-                        "fn", "let", "mut", "pub", "struct", "enum", "impl", "use", "mod",
-                        "trait", "match", "if", "else", "for", "while", "loop", "return", "self",
-                        "Self", "crate", "super", "const", "static", "ref", "as", "in", "where",
-                        "async", "await",
+                        "fn", "let", "mut", "pub", "struct", "enum", "impl", "use", "mod", "trait",
+                        "match", "if", "else", "for", "while", "loop", "return", "self", "Self",
+                        "crate", "super", "const", "static", "ref", "as", "in", "where", "async",
+                        "await",
                     ][..],
                     Language::Python => &[
                         "def", "class", "self", "return", "import", "from", "as", "if", "elif",
@@ -4969,10 +4979,39 @@ impl TextBuffer {
                         "yield", "True", "False", "None", "and", "or", "not", "in", "is",
                     ][..],
                     Language::JavaScript | Language::TypeScript => &[
-                        "function", "return", "const", "let", "var", "if", "else", "for", "while",
-                        "do", "switch", "case", "break", "continue", "try", "catch", "finally",
-                        "throw", "class", "extends", "new", "this", "super", "import", "from",
-                        "export", "default", "async", "await", "true", "false", "null", "undefined",
+                        "function",
+                        "return",
+                        "const",
+                        "let",
+                        "var",
+                        "if",
+                        "else",
+                        "for",
+                        "while",
+                        "do",
+                        "switch",
+                        "case",
+                        "break",
+                        "continue",
+                        "try",
+                        "catch",
+                        "finally",
+                        "throw",
+                        "class",
+                        "extends",
+                        "new",
+                        "this",
+                        "super",
+                        "import",
+                        "from",
+                        "export",
+                        "default",
+                        "async",
+                        "await",
+                        "true",
+                        "false",
+                        "null",
+                        "undefined",
                     ][..],
                     Language::Html => &[
                         "html", "head", "body", "div", "span", "p", "a", "ul", "ol", "li",
@@ -4981,40 +5020,118 @@ impl TextBuffer {
                         "style",
                     ][..],
                     Language::Css => &[
-                        "color", "background", "display", "flex", "grid", "margin", "padding",
-                        "font", "position", "absolute", "relative", "fixed", "border", "width",
-                        "height", "gap",
+                        "color",
+                        "background",
+                        "display",
+                        "flex",
+                        "grid",
+                        "margin",
+                        "padding",
+                        "font",
+                        "position",
+                        "absolute",
+                        "relative",
+                        "fixed",
+                        "border",
+                        "width",
+                        "height",
+                        "gap",
                     ][..],
-                    Language::Shell => &[
-                        "if", "then", "fi", "for", "do", "done", "case", "esac", "function", "in",
-                    ][..],
+                    Language::Shell => {
+                        &["if", "then", "fi", "for", "do", "done", "case", "esac", "function", "in"]
+                            [..]
+                    }
                     Language::C | Language::Cpp => &[
-                        "int", "char", "void", "struct", "class", "namespace", "if", "else", "for",
-                        "while", "return", "const", "static", "typedef", "enum",
+                        "int",
+                        "char",
+                        "void",
+                        "struct",
+                        "class",
+                        "namespace",
+                        "if",
+                        "else",
+                        "for",
+                        "while",
+                        "return",
+                        "const",
+                        "static",
+                        "typedef",
+                        "enum",
                     ][..],
                     Language::CSharp => &[
-                        "class", "struct", "interface", "using", "namespace", "public", "private",
-                        "protected", "static", "async", "await", "return", "new",
+                        "class",
+                        "struct",
+                        "interface",
+                        "using",
+                        "namespace",
+                        "public",
+                        "private",
+                        "protected",
+                        "static",
+                        "async",
+                        "await",
+                        "return",
+                        "new",
                     ][..],
                     Language::Go => &[
-                        "package", "import", "func", "type", "struct", "interface", "if", "else",
-                        "for", "return", "go", "defer",
+                        "package",
+                        "import",
+                        "func",
+                        "type",
+                        "struct",
+                        "interface",
+                        "if",
+                        "else",
+                        "for",
+                        "return",
+                        "go",
+                        "defer",
                     ][..],
                     Language::Java => &[
-                        "class", "interface", "extends", "implements", "public", "private",
-                        "protected", "static", "final", "return", "new", "import",
+                        "class",
+                        "interface",
+                        "extends",
+                        "implements",
+                        "public",
+                        "private",
+                        "protected",
+                        "static",
+                        "final",
+                        "return",
+                        "new",
+                        "import",
                     ][..],
                     Language::Kotlin => &[
-                        "class", "interface", "fun", "val", "var", "object", "when", "if", "else",
-                        "for", "while", "return", "import",
+                        "class",
+                        "interface",
+                        "fun",
+                        "val",
+                        "var",
+                        "object",
+                        "when",
+                        "if",
+                        "else",
+                        "for",
+                        "while",
+                        "return",
+                        "import",
                     ][..],
                     Language::Ruby => &[
                         "def", "class", "module", "end", "if", "elsif", "else", "true", "false",
                         "nil", "require", "return",
                     ][..],
                     Language::Php => &[
-                        "function", "class", "public", "private", "protected", "echo", "return",
-                        "true", "false", "null", "new",
+                        "function",
+                        "class",
+                        "public",
+                        "private",
+                        "protected",
+                        "echo",
+                        "return",
+                        "true",
+                        "false",
+                        "null",
+                        "new",
                     ][..],
                     Language::Sql => &[
                         "select", "from", "where", "join", "insert", "update", "delete", "create",
@@ -5031,20 +5148,41 @@ impl TextBuffer {
                         "$null",
                     ][..],
                     Language::R => &[
-                        "function", "if", "else", "for", "while", "return", "TRUE", "FALSE",
-                        "NULL",
+                        "function", "if", "else", "for", "while", "return", "TRUE", "FALSE", "NULL",
                     ][..],
                     Language::Swift => &[
                         "class", "struct", "enum", "protocol", "func", "let", "var", "if", "else",
                         "for", "while", "return", "import",
                     ][..],
                     Language::ObjectiveC => &[
-                        "interface", "implementation", "end", "class", "void", "int", "return",
-                        "if", "else", "for", "while", "nil",
+                        "interface",
+                        "implementation",
+                        "end",
+                        "class",
+                        "void",
+                        "int",
+                        "return",
+                        "if",
+                        "else",
+                        "for",
+                        "while",
+                        "nil",
                     ][..],
                     Language::Dart => &[
-                        "class", "enum", "extends", "implements", "import", "library", "void",
-                        "final", "var", "if", "else", "for", "while", "return",
+                        "class",
+                        "enum",
+                        "extends",
+                        "implements",
+                        "import",
+                        "library",
+                        "void",
+                        "final",
+                        "var",
+                        "if",
+                        "else",
+                        "for",
+                        "while",
+                        "return",
                     ][..],
                     Language::Scala => &[
                         "class", "object", "trait", "def", "val", "var", "if", "else", "for",
@@ -5055,43 +5193,65 @@ impl TextBuffer {
                         "else", "case", "of",
                     ][..],
                     Language::Elixir => &[
-                        "def", "defmodule", "do", "end", "if", "else", "case", "when", "true",
-                        "false", "nil",
+                        "def",
+                        "defmodule",
+                        "do",
+                        "end",
+                        "if",
+                        "else",
+                        "case",
+                        "when",
+                        "true",
+                        "false",
+                        "nil",
                     ][..],
-                    Language::Erlang => &[
-                        "module", "export", "fun", "if", "case", "of", "end", "true", "false",
-                    ][..],
-                    Language::Clojure => &[
-                        "def", "defn", "let", "if", "do", "fn", "true", "false", "nil",
-                    ][..],
+                    Language::Erlang => {
+                        &["module", "export", "fun", "if", "case", "of", "end", "true", "false"][..]
+                    }
+                    Language::Clojure => {
+                        &["def", "defn", "let", "if", "do", "fn", "true", "false", "nil"][..]
+                    }
                     Language::FSharp => &[
                         "let", "module", "type", "open", "if", "then", "else", "match", "with",
                         "fun", "true", "false",
                     ][..],
                     Language::VbNet => &[
-                        "Class", "Module", "Sub", "Function", "End", "If", "Then", "Else",
-                        "Dim", "As", "Return",
+                        "Class", "Module", "Sub", "Function", "End", "If", "Then", "Else", "Dim",
+                        "As", "Return",
                     ][..],
-                    Language::Perl => &[
-                        "my", "our", "sub", "use", "if", "else", "elsif", "return", "undef",
-                    ][..],
-                    Language::Groovy => &[
-                        "class", "def", "import", "if", "else", "for", "while", "return", "new",
-                    ][..],
+                    Language::Perl => {
+                        &["my", "our", "sub", "use", "if", "else", "elsif", "return", "undef"][..]
+                    }
+                    Language::Groovy => {
+                        &["class", "def", "import", "if", "else", "for", "while", "return", "new"][..]
+                    }
                     Language::Terraform => &[
                         "resource", "variable", "output", "module", "provider", "data", "true",
                         "false",
                     ][..],
-                    Language::Nix => &[
-                        "let", "in", "with", "rec", "if", "then", "else", "true", "false", "null",
-                    ][..],
+                    Language::Nix => {
+                        &["let", "in", "with", "rec", "if", "then", "else", "true", "false", "null"]
+                            [..]
+                    }
                     Language::Assembly => &["mov", "add", "sub", "jmp", "call", "ret"][..],
                     Language::Latex => &[
-                        "documentclass", "begin", "end", "usepackage", "section", "subsection",
-                        "title", "author",
+                        "documentclass",
+                        "begin",
+                        "end",
+                        "usepackage",
+                        "section",
+                        "subsection",
+                        "title",
+                        "author",
                     ][..],
                     Language::Graphql => &[
-                        "query", "mutation", "subscription", "fragment", "on", "true", "false",
+                        "query",
+                        "mutation",
+                        "subscription",
+                        "fragment",
+                        "on",
+                        "true",
+                        "false",
                         "null",
                     ][..],
                     _ => &[][..],
@@ -5144,11 +5304,7 @@ impl TextBuffer {
                         }
                         i += 1;
                     }
-                    spans.push(HighlightSpan {
-                        start,
-                        end: i,
-                        kind: HighlightKind::Number,
-                    });
+                    spans.push(HighlightSpan { start, end: i, kind: HighlightKind::Number });
                 }
             }
         }
@@ -5225,14 +5381,12 @@ fn find_search_matches(line: &str, needle: &str, options: SearchOptions) -> Vec<
     let (haystack, needle_cmp): (Cow<'_, str>, Cow<'_, str>) = if options.match_case {
         (Cow::Borrowed(line), Cow::Borrowed(needle))
     } else {
-        let line_lower = String::from_utf8(
-            line.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
-        )
-        .unwrap();
-        let needle_lower = String::from_utf8(
-            needle.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect(),
-        )
-        .unwrap();
+        let line_lower =
+            String::from_utf8(line.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect())
+                .unwrap();
+        let needle_lower =
+            String::from_utf8(needle.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect())
+                .unwrap();
         (Cow::Owned(line_lower), Cow::Owned(needle_lower))
     };
     let haystack = haystack.as_ref();

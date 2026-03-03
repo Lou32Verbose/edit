@@ -209,13 +209,13 @@ pub fn draw_file_picker(ctx: &mut Context, state: &mut State) {
             ctx.inherit_focus();
             ctx.attr_padding(Rect::three(0, 2, 1));
             ctx.attr_position(Position::Center);
-        ctx.table_set_cell_gap(Size { width: 2, height: 0 });
-        {
-            ctx.table_next_row();
-            ctx.inherit_focus();
-            ctx.focus_on_first_present();
+            ctx.table_set_cell_gap(Size { width: 2, height: 0 });
+            {
+                ctx.table_next_row();
+                ctx.inherit_focus();
+                ctx.focus_on_first_present();
 
-            save = ctx.button("yes", loc(LocId::Yes), ButtonStyle::default());
+                save = ctx.button("yes", loc(LocId::Yes), ButtonStyle::default());
                 ctx.inherit_focus();
 
                 if ctx.button("no", loc(LocId::No), ButtonStyle::default()) {

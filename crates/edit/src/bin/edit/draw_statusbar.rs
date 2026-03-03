@@ -1,22 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::path::PathBuf;
+
 use edit::framebuffer::{Attributes, IndexedColor};
 use edit::fuzzy::score_fuzzy;
 use edit::helpers::*;
 use edit::icu;
 use edit::input::vk;
 use edit::tui::*;
-use std::path::PathBuf;
 use stdext::arena::scratch_arena;
 use stdext::arena_format;
 
 use crate::commands::{self, CommandGroup, CommandId};
 use crate::config::{self, ThemeId};
-use crate::find_in_files;
 use crate::localization::*;
-use crate::{search_execute, SearchAction};
 use crate::state::*;
+use crate::{SearchAction, find_in_files, search_execute};
 
 pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
     ctx.table_begin("statusbar");
@@ -173,12 +173,7 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
             let sel_words = tb.selection_word_count().unwrap_or(0);
             ctx.label(
                 "selection-stats",
-                &arena_format!(
-                    ctx.arena(),
-                    "Sel: {} words, {} chars",
-                    sel_words,
-                    sel_len
-                ),
+                &arena_format!(ctx.arena(), "Sel: {} words, {} chars", sel_words, sel_len),
             );
         } else {
             ctx.label(
@@ -232,7 +227,6 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
     }
 
     ctx.table_end();
-
 }
 
 pub fn draw_quick_switcher(ctx: &mut Context, state: &mut State) {
@@ -502,7 +496,9 @@ pub fn draw_keybinding_editor(ctx: &mut Context, state: &mut State) {
                     pending_capture = None;
                 } else {
                     state.keybindings.set_override(cmd, key);
-                    let _ = config::persist_keybindings(&state.keybindings);
+                    if let Err(err) = config::persist_keybindings(&state.keybindings) {
+                        error_log_add(ctx, state, err);
+                    }
                     pending_capture = None;
                 }
                 ctx.needs_rerender();
@@ -691,7 +687,6 @@ pub fn draw_go_to_file(ctx: &mut Context, state: &mut State) {
     }
 }
 
-
 pub fn draw_command_palette(ctx: &mut Context, state: &mut State) {
     let mut activated = None;
     let mut done = false;
@@ -780,12 +775,10 @@ pub fn draw_command_palette(ctx: &mut Context, state: &mut State) {
 
         if ctx.contains_focus() {
             if ctx.consume_shortcut(vk::UP) {
-                state.command_palette_selected =
-                    state.command_palette_selected.saturating_sub(1);
+                state.command_palette_selected = state.command_palette_selected.saturating_sub(1);
             } else if ctx.consume_shortcut(vk::DOWN) {
-                state.command_palette_selected =
-                    (state.command_palette_selected + 1)
-                        .min(ordered_commands.len().saturating_sub(1));
+                state.command_palette_selected = (state.command_palette_selected + 1)
+                    .min(ordered_commands.len().saturating_sub(1));
             }
         }
 
@@ -950,12 +943,10 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
 
         if ctx.contains_focus() {
             if ctx.consume_shortcut(vk::UP) {
-                state.find_in_files_selected =
-                    state.find_in_files_selected.saturating_sub(1);
+                state.find_in_files_selected = state.find_in_files_selected.saturating_sub(1);
             } else if ctx.consume_shortcut(vk::DOWN) {
-                state.find_in_files_selected =
-                    (state.find_in_files_selected + 1)
-                        .min(state.find_in_files_results.len().saturating_sub(1));
+                state.find_in_files_selected = (state.find_in_files_selected + 1)
+                    .min(state.find_in_files_results.len().saturating_sub(1));
             }
         }
 
@@ -1003,10 +994,7 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
         let results = find_in_files::search(root, &state.find_in_files_query);
         state.find_in_files_results = results;
         state.find_in_files_selected = 0;
-        state.find_in_files_status = format!(
-            "{} result(s)",
-            state.find_in_files_results.len()
-        );
+        state.find_in_files_status = format!("{} result(s)", state.find_in_files_results.len());
         ctx.needs_rerender();
     } else if do_preview {
         let root = state.find_in_files_root.as_path();
@@ -1047,12 +1035,7 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
     } else if let Some(index) = activated {
         if let Some(result) = state.find_in_files_results.get(index) {
             let path = result.path.as_path();
-            let goto = format!(
-                "{}:{}:{}",
-                path.to_string_lossy(),
-                result.line,
-                result.column
-            );
+            let goto = format!("{}:{}:{}", path.to_string_lossy(), result.line, result.column);
             let goto_path = std::path::PathBuf::from(goto);
             match state.documents.add_file_path(&goto_path, &state.settings) {
                 Ok(crate::documents::OpenOutcome::Opened) => {

@@ -316,22 +316,13 @@ fn draw_menu_view(ctx: &mut Context, state: &mut State) {
                 ctx.needs_rerender();
             }
         }
-        if ctx.menubar_menu_checkbox(
-            "High Contrast",
-            'H',
-            vk::NULL,
-            state.settings.high_contrast,
-        ) {
+        if ctx.menubar_menu_checkbox("High Contrast", 'H', vk::NULL, state.settings.high_contrast) {
             state.settings.high_contrast = !state.settings.high_contrast;
             state.needs_theme_refresh = true;
             ctx.needs_rerender();
         }
-        if ctx.menubar_menu_checkbox(
-            "Escape to Exit",
-            'X',
-            vk::NULL,
-            state.settings.escape_to_exit,
-        ) {
+        if ctx.menubar_menu_checkbox("Escape to Exit", 'X', vk::NULL, state.settings.escape_to_exit)
+        {
             state.settings.escape_to_exit = !state.settings.escape_to_exit;
             ctx.needs_rerender();
         }

@@ -1,19 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use edit::apperr;
-use edit::sys;
+use edit::buffer::SearchOptions;
+use edit::{apperr, sys};
 
 use crate::documents::DocumentManager;
 use crate::state::{DisplayablePathBuf, ReplacePreviewItem};
-use edit::buffer::SearchOptions;
 
 const MAX_RESULTS: usize = 500;
 const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+const MAX_RECURSION_DEPTH: usize = 24;
+const MAX_FILES_SCANNED: usize = 50_000;
 
 pub struct FindInFilesResult {
     pub path: DisplayablePathBuf,
@@ -192,21 +194,48 @@ pub fn preview_replace(
 }
 
 fn collect_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let mut visited_dirs = HashSet::new();
+    collect_files_inner(root, out, &mut visited_dirs, 0);
+}
+
+fn collect_files_inner(
+    root: &Path,
+    out: &mut Vec<PathBuf>,
+    visited_dirs: &mut HashSet<PathBuf>,
+    depth: usize,
+) {
+    if depth >= MAX_RECURSION_DEPTH || out.len() >= MAX_FILES_SCANNED {
+        return;
+    }
+
+    let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if !visited_dirs.insert(canonical) {
+        return;
+    }
+
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
 
     for entry in entries.flatten() {
+        if out.len() >= MAX_FILES_SCANNED {
+            break;
+        }
+
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
 
+        if file_type.is_symlink() {
+            continue;
+        }
+
         if file_type.is_dir() {
             if should_skip_dir(&path) {
                 continue;
             }
-            collect_files(&path, out);
+            collect_files_inner(&path, out, visited_dirs, depth + 1);
         } else if file_type.is_file() {
             out.push(path);
         }
@@ -228,7 +257,11 @@ fn trim_preview(line: &str) -> String {
     preview
 }
 
-fn preview_find_matches(line: &str, needle: &str, options: SearchOptions) -> Vec<std::ops::Range<usize>> {
+fn preview_find_matches(
+    line: &str,
+    needle: &str,
+    options: SearchOptions,
+) -> Vec<std::ops::Range<usize>> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -287,7 +320,11 @@ fn preview_is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-fn replace_line_with_matches(line: &str, matches: &[std::ops::Range<usize>], replacement: &str) -> String {
+fn replace_line_with_matches(
+    line: &str,
+    matches: &[std::ops::Range<usize>],
+    replacement: &str,
+) -> String {
     if matches.is_empty() {
         return line.to_string();
     }
@@ -314,4 +351,38 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
         start += pos + needle.len();
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        path.push(format!("edit32-find-{name}-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&path).expect("failed to create temp dir");
+        path
+    }
+
+    #[test]
+    fn search_respects_recursion_depth_limit() {
+        let root = temp_dir("depth");
+        let mut current = root.clone();
+        for idx in 0..(MAX_RECURSION_DEPTH + 2) {
+            current.push(format!("d{idx}"));
+            fs::create_dir_all(&current).expect("failed to create nested dir");
+        }
+        fs::write(current.join("deep.txt"), b"needle").expect("failed to write deep file");
+
+        let results = search(&root, "needle");
+        assert!(results.is_empty(), "deep file should not be reachable past recursion depth limit");
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

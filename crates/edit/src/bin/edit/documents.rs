@@ -8,10 +8,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use edit::buffer::{Language, RcTextBuffer, TextBuffer};
-use crate::config::EditorSettings;
 use edit::helpers::{CoordType, Point};
 use edit::{apperr, path, sys};
 
+use crate::config::EditorSettings;
 use crate::state::DisplayablePathBuf;
 
 pub struct Document {
@@ -85,10 +85,7 @@ impl Document {
         let language = if self.mode != DocumentMode::Text {
             Language::PlainText
         } else {
-            self.path
-                .as_ref()
-                .map(|path| language_for_path(path))
-                .unwrap_or(Language::PlainText)
+            self.path.as_ref().map(|path| language_for_path(path)).unwrap_or(Language::PlainText)
         };
         self.buffer.borrow_mut().set_language(language);
     }

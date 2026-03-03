@@ -368,7 +368,9 @@ pub fn push_recent_file(state: &mut State, path: PathBuf) {
     }
     state.recent_files.insert(0, path);
     state.recent_files.truncate(20);
-    let _ = config::persist_recents(&state.recent_files, &state.recent_folders);
+    if let Err(err) = config::persist_recents(&state.recent_files, &state.recent_folders) {
+        error_log_add_without_rerender(state, err);
+    }
 }
 
 pub fn push_recent_folder(state: &mut State, path: PathBuf) {
@@ -377,7 +379,18 @@ pub fn push_recent_folder(state: &mut State, path: PathBuf) {
     }
     state.recent_folders.insert(0, path);
     state.recent_folders.truncate(10);
-    let _ = config::persist_recents(&state.recent_files, &state.recent_folders);
+    if let Err(err) = config::persist_recents(&state.recent_files, &state.recent_folders) {
+        error_log_add_without_rerender(state, err);
+    }
+}
+
+fn error_log_add_without_rerender(state: &mut State, err: apperr::Error) {
+    let msg = format!("{}", FormatApperr::from(err));
+    if !msg.is_empty() {
+        state.error_log[state.error_log_index] = msg;
+        state.error_log_index = (state.error_log_index + 1) % state.error_log.len();
+        state.error_log_count = state.error_log.len().min(state.error_log_count + 1);
+    }
 }
 
 pub fn error_log_add(ctx: &mut Context, state: &mut State, err: apperr::Error) {

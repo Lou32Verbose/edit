@@ -146,6 +146,7 @@
 use std::arch::breakpoint;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::{iter, mem, ptr, time};
 
@@ -371,6 +372,7 @@ pub struct Tui {
     settling_have: i32,
     settling_want: i32,
     read_timeout: time::Duration,
+    pending_text_keyboard: VecDeque<InputKey>,
 }
 
 impl Tui {
@@ -421,6 +423,7 @@ impl Tui {
             settling_have: 0,
             settling_want: 0,
             read_timeout: time::Duration::MAX,
+            pending_text_keyboard: VecDeque::new(),
         };
         Self::clean_node_path(&mut tui.mouse_down_node_path);
         Self::clean_node_path(&mut tui.focused_node_path);
@@ -535,14 +538,17 @@ impl Tui {
         // `self.needs_settling() == true`. However, there's a possibility for it being true from
         // a previous frame, and we do have fresh new input. In that case want `input_consumed`
         // to be false of course which is ensured by checking for `input.is_none()`.
-        let input_consumed = self.needs_settling() && input.is_none();
+        let input_consumed =
+            self.needs_settling() && input.is_none() && self.pending_text_keyboard.is_empty();
 
         if self.scroll_to_focused() {
             self.needs_more_settling();
         }
 
         match input {
-            None => {}
+            None => {
+                input_keyboard = self.pending_text_keyboard.pop_front();
+            }
             Some(Input::Resize(resize)) => {
                 assert!(resize.width > 0 && resize.height > 0);
                 assert!(resize.width < 32768 && resize.height < 32768);
@@ -550,14 +556,9 @@ impl Tui {
             }
             Some(Input::Text(text)) => {
                 input_text = Some(text);
-                // TODO: the .len()==1 check causes us to ignore keyboard inputs that are faster than we process them.
-                // For instance, imagine the user presses "A" twice and we happen to read it in a single chunk.
-                // This causes us to ignore the keyboard input here. We need a way to inform the caller over
-                // how much of the input text we actually processed in a single frame. Or perhaps we could use
-                // the needs_settling logic?
-                if text.len() == 1 {
-                    let ch = text.as_bytes()[0];
-                    input_keyboard = InputKey::from_ascii(ch as char)
+                if text.is_ascii() {
+                    queue_ascii_text_as_keyboard(&mut self.pending_text_keyboard, text);
+                    input_keyboard = self.pending_text_keyboard.pop_front();
                 }
             }
             Some(Input::Paste(paste)) => {
@@ -1316,6 +1317,28 @@ impl Tui {
 
         self.focused_node_for_scrolling = focused_id;
         true
+    }
+}
+
+fn queue_ascii_text_as_keyboard(queue: &mut VecDeque<InputKey>, text: &str) {
+    for ch in text.bytes() {
+        if let Some(key) = InputKey::from_ascii(ch as char) {
+            queue.push_back(key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_ascii_text_as_keyboard_splits_input() {
+        let mut queue = VecDeque::new();
+        queue_ascii_text_as_keyboard(&mut queue, "ab");
+        assert!(queue.pop_front() == InputKey::from_ascii('a'));
+        assert!(queue.pop_front() == InputKey::from_ascii('b'));
+        assert!(queue.is_empty());
     }
 }
 
@@ -3223,7 +3246,7 @@ impl<'a> Context<'a, '_> {
                 anchor: Anchor::Last,
                 gravity_x: 0.0,
                 gravity_y: 0.0,
-                offset_x: 1.0,  // Offset to the right for nested submenu
+                offset_x: 1.0, // Offset to the right for nested submenu
                 offset_y: 0.0,
             });
             self.attr_border();
@@ -3294,9 +3317,8 @@ impl<'a> Context<'a, '_> {
     pub fn menubar_menu_end(&mut self) {
         // Check for Escape BEFORE ending the flyout, while current_node is still the flyout
         // and we can accurately check if it contains focus
-        let should_handle_escape = !self.input_consumed
-            && self.input_keyboard == Some(vk::ESCAPE)
-            && {
+        let should_handle_escape =
+            !self.input_consumed && self.input_keyboard == Some(vk::ESCAPE) && {
                 // Check if current_node (the flyout) is in the focus path
                 let cn = self.tree.current_node.borrow();
                 self.tui.is_subtree_focused_alt(cn.id, cn.depth)

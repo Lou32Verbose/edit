@@ -3,13 +3,13 @@
 
 #![feature(allocator_api, linked_list_cursors, string_from_utf8_lossy_owned)]
 
+mod commands;
+mod config;
 mod documents;
 mod draw_editor;
 mod draw_filepicker;
 mod draw_menubar;
 mod draw_statusbar;
-mod config;
-mod commands;
 mod find_in_files;
 mod localization;
 mod state;
@@ -565,12 +565,9 @@ fn apply_theme(tui: &mut Tui, state: &mut State) {
         state.editor_color_bg = tui.indexed(IndexedColor::Black);
         state.editor_color_fg = tui.indexed(IndexedColor::BrightWhite);
     } else {
-        state.menubar_color_bg =
-            tui.indexed(IndexedColor::Background).oklab_blend(tui.indexed_alpha(
-                IndexedColor::BrightBlue,
-                1,
-                2,
-            ));
+        state.menubar_color_bg = tui
+            .indexed(IndexedColor::Background)
+            .oklab_blend(tui.indexed_alpha(IndexedColor::BrightBlue, 1, 2));
         state.menubar_color_fg = tui.contrasted(state.menubar_color_bg);
         let floater_bg = tui
             .indexed_alpha(IndexedColor::Background, 2, 3)
@@ -1162,12 +1159,7 @@ fn context_help_lines(state: &State) -> &'static [&'static str] {
             "- Press Esc to cancel capture",
         ];
     }
-    &[
-        "General:",
-        "- F1: Command Palette",
-        "- Ctrl+O: Open file",
-        "- Ctrl+Shift+O: Open folder",
-    ]
+    &["General:", "- F1: Command Palette", "- Ctrl+O: Open file", "- Ctrl+Shift+O: Open folder"]
 }
 
 fn draw_quick_start(ctx: &mut Context, state: &mut State) {

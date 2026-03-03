@@ -207,8 +207,8 @@ Environment variable | Description
 
 Edit32 stores its configuration in a platform-specific location:
 - **Windows**: `%APPDATA%\edit32\config.ini`
-- **macOS**: `~/Library/Application Support/edit32/config.ini`
-- **Linux**: `~/.config/edit32/config.ini`
+- **macOS**: `~/.config/edit32/config.ini` (or `$XDG_CONFIG_HOME/edit32/config.ini` when set)
+- **Linux**: `~/.config/edit32/config.ini` (or `$XDG_CONFIG_HOME/edit32/config.ini` when set)
 
 ### Customizing Keybindings
 
