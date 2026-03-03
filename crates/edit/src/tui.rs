@@ -173,6 +173,25 @@ type Input<'input> = input::Input<'input>;
 type InputKey = input::InputKey;
 type InputMouseState = input::InputMouseState;
 
+struct FrameInput<'input> {
+    text: Option<&'input str>,
+    keyboard: Option<InputKey>,
+    mouse_modifiers: InputKeyMod,
+    mouse_click: CoordType,
+    scroll_delta: Point,
+}
+
+enum TextareaBasicKeyOutcome {
+    Handled,
+    Reject,
+}
+
+struct TextareaKeyboardDispatch {
+    change_preferred_column: bool,
+    write_newline: bool,
+    make_cursor_visible: bool,
+}
+
 /// Since [`TextBuffer`] creation and management is expensive,
 /// we cache instances of them for reuse between frames.
 /// This is used for [`Context::editline()`].
@@ -529,11 +548,6 @@ impl Tui {
         }
 
         let now = std::time::Instant::now();
-        let mut input_text = None;
-        let mut input_keyboard = None;
-        let mut input_mouse_modifiers = kbmod::NONE;
-        let mut input_mouse_click = 0;
-        let mut input_scroll_delta = Point { x: 0, y: 0 };
         // `input_consumed` should be `true` if we're in the settling phase which is indicated by
         // `self.needs_settling() == true`. However, there's a possibility for it being true from
         // a previous frame, and we do have fresh new input. In that case want `input_consumed`
@@ -545,145 +559,7 @@ impl Tui {
             self.needs_more_settling();
         }
 
-        match input {
-            None => {
-                input_keyboard = self.pending_text_keyboard.pop_front();
-            }
-            Some(Input::Resize(resize)) => {
-                assert!(resize.width > 0 && resize.height > 0);
-                assert!(resize.width < 32768 && resize.height < 32768);
-                self.size = resize;
-            }
-            Some(Input::Text(text)) => {
-                input_text = Some(text);
-                if text.is_ascii() {
-                    queue_ascii_text_as_keyboard(&mut self.pending_text_keyboard, text);
-                    input_keyboard = self.pending_text_keyboard.pop_front();
-                }
-            }
-            Some(Input::Paste(paste)) => {
-                let clipboard = self.clipboard_mut();
-                clipboard.write(paste);
-                clipboard.mark_as_synchronized();
-                input_keyboard = Some(kbmod::CTRL | vk::V);
-            }
-            Some(Input::Keyboard(keyboard)) => {
-                input_keyboard = Some(keyboard);
-            }
-            Some(Input::Mouse(mouse)) => {
-                let mut next_state = mouse.state;
-                let next_position = mouse.position;
-                let next_scroll = mouse.scroll;
-                let mouse_down = self.mouse_state == InputMouseState::None
-                    && next_state != InputMouseState::None;
-                let mouse_up = self.mouse_state != InputMouseState::None
-                    && next_state == InputMouseState::None;
-                let is_scroll = next_scroll != Point::default();
-                let is_drag = self.mouse_state == InputMouseState::Left
-                    && next_state == InputMouseState::Left
-                    && next_position != self.mouse_position;
-
-                let mut hovered_node = None; // Needed for `mouse_down`
-                let mut focused_node = None; // Needed for `mouse_down` and `is_click`
-                if mouse_down || mouse_up {
-                    // Roots (aka windows) are ordered in Z order, so we iterate
-                    // them in reverse order, from topmost to bottommost.
-                    for root in self.prev_tree.iterate_roots_rev() {
-                        // Find the node that contains the cursor.
-                        Tree::visit_all(root, root, true, |node| {
-                            let n = node.borrow();
-                            if !n.outer_clipped.contains(next_position) {
-                                // Skip the entire sub-tree, because it doesn't contain the cursor.
-                                return VisitControl::SkipChildren;
-                            }
-                            hovered_node = Some(node);
-                            if n.attributes.focusable {
-                                focused_node = Some(node);
-                            }
-                            VisitControl::Continue
-                        });
-
-                        // This root/window contains the cursor.
-                        // We don't care about any lower roots.
-                        if hovered_node.is_some() {
-                            break;
-                        }
-
-                        // This root is modal and swallows all clicks,
-                        // no matter whether the click was inside it or not.
-                        if matches!(root.borrow().content, NodeContent::Modal(_)) {
-                            break;
-                        }
-                    }
-                }
-
-                if is_scroll {
-                    next_state = self.mouse_state;
-                } else if is_drag {
-                    self.mouse_is_drag = true;
-                } else if mouse_down {
-                    // Transition from no mouse input to some mouse input --> Record the mouse down position.
-                    Self::build_node_path(hovered_node, &mut self.mouse_down_node_path);
-
-                    // On left-mouse-down we change focus.
-                    let mut target = 0;
-                    if next_state == InputMouseState::Left {
-                        target = focused_node.map_or(0, |n| n.borrow().id);
-                        Self::build_node_path(focused_node, &mut self.focused_node_path);
-                        self.needs_more_settling(); // See `needs_more_settling()`.
-                    }
-
-                    // Double-/Triple-/Etc.-clicks are triggered on mouse-down,
-                    // unlike the first initial click, which is triggered on mouse-up.
-                    if self.mouse_click_counter != 0 {
-                        if self.first_click_target != target
-                            || self.first_click_position != next_position
-                            || (now - self.mouse_up_timestamp)
-                                > std::time::Duration::from_millis(500)
-                        {
-                            // If the cursor moved / the focus changed in between, or if the user did a slow click,
-                            // we reset the click counter. On mouse-up it'll transition to a regular click.
-                            self.mouse_click_counter = 0;
-                            self.first_click_position = Point::MIN;
-                            self.first_click_target = 0;
-                        } else {
-                            self.mouse_click_counter += 1;
-                            input_mouse_click = self.mouse_click_counter;
-                        };
-                    }
-
-                    // Gets reset at the start of this function.
-                    self.left_mouse_down_target = target;
-                    self.mouse_down_position = next_position;
-                } else if mouse_up {
-                    // Transition from some mouse input to no mouse input --> The mouse button was released.
-                    next_state = InputMouseState::Release;
-
-                    let target = focused_node.map_or(0, |n| n.borrow().id);
-
-                    if self.left_mouse_down_target == 0 || self.left_mouse_down_target != target {
-                        // If `left_mouse_down_target == 0`, then it wasn't a left-click, in which case
-                        // the target gets reset. Same, if the focus changed in between any clicks.
-                        self.mouse_click_counter = 0;
-                        self.first_click_position = Point::MIN;
-                        self.first_click_target = 0;
-                    } else if self.mouse_click_counter == 0 {
-                        // No focus change, and no previous clicks? This is an initial, regular click.
-                        self.mouse_click_counter = 1;
-                        self.first_click_position = self.mouse_down_position;
-                        self.first_click_target = target;
-                        input_mouse_click = 1;
-                    }
-
-                    self.mouse_up_timestamp = now;
-                }
-
-                input_mouse_modifiers = mouse.modifiers;
-                input_scroll_delta = next_scroll;
-                self.mouse_position = next_position;
-                self.mouse_state = next_state;
-            }
-        }
+        let input = self.process_frame_input(input, now);
 
         if !input_consumed {
             // Every time there's input, we naturally need to re-render at least once.
@@ -699,11 +575,11 @@ impl Tui {
         Context {
             tui: self,
 
-            input_text,
-            input_keyboard,
-            input_mouse_modifiers,
-            input_mouse_click,
-            input_scroll_delta,
+            input_text: input.text,
+            input_keyboard: input.keyboard,
+            input_mouse_modifiers: input.mouse_modifiers,
+            input_mouse_click: input.mouse_click,
+            input_scroll_delta: input.scroll_delta,
             input_consumed,
 
             tree,
@@ -715,6 +591,170 @@ impl Tui {
             #[cfg(debug_assertions)]
             seen_ids: HashSet::new(),
         }
+    }
+
+    fn process_frame_input<'input>(
+        &mut self,
+        input: Option<Input<'input>>,
+        now: std::time::Instant,
+    ) -> FrameInput<'input> {
+        let mut frame = FrameInput {
+            text: None,
+            keyboard: None,
+            mouse_modifiers: kbmod::NONE,
+            mouse_click: 0,
+            scroll_delta: Point { x: 0, y: 0 },
+        };
+
+        match input {
+            None => {
+                frame.keyboard = self.pending_text_keyboard.pop_front();
+            }
+            Some(Input::Resize(resize)) => {
+                assert!(resize.width > 0 && resize.height > 0);
+                assert!(resize.width < 32768 && resize.height < 32768);
+                self.size = resize;
+            }
+            Some(Input::Text(text)) => {
+                frame.text = Some(text);
+                if text.is_ascii() {
+                    queue_ascii_text_as_keyboard(&mut self.pending_text_keyboard, text);
+                    frame.keyboard = self.pending_text_keyboard.pop_front();
+                }
+            }
+            Some(Input::Paste(paste)) => {
+                let clipboard = self.clipboard_mut();
+                clipboard.write(paste);
+                clipboard.mark_as_synchronized();
+                frame.keyboard = Some(kbmod::CTRL | vk::V);
+            }
+            Some(Input::Keyboard(keyboard)) => {
+                frame.keyboard = Some(keyboard);
+            }
+            Some(Input::Mouse(mouse)) => {
+                self.process_mouse_input(mouse, now, &mut frame);
+            }
+        }
+
+        frame
+    }
+
+    fn process_mouse_input(
+        &mut self,
+        mouse: input::InputMouse,
+        now: std::time::Instant,
+        frame: &mut FrameInput<'_>,
+    ) {
+        let mut next_state = mouse.state;
+        let next_position = mouse.position;
+        let next_scroll = mouse.scroll;
+        let mouse_down =
+            self.mouse_state == InputMouseState::None && next_state != InputMouseState::None;
+        let mouse_up =
+            self.mouse_state != InputMouseState::None && next_state == InputMouseState::None;
+        let is_scroll = next_scroll != Point::default();
+        let is_drag = self.mouse_state == InputMouseState::Left
+            && next_state == InputMouseState::Left
+            && next_position != self.mouse_position;
+
+        let mut hovered_node = None; // Needed for `mouse_down`
+        let mut focused_node = None; // Needed for `mouse_down` and `is_click`
+        if mouse_down || mouse_up {
+            // Roots (aka windows) are ordered in Z order, so we iterate
+            // them in reverse order, from topmost to bottommost.
+            for root in self.prev_tree.iterate_roots_rev() {
+                // Find the node that contains the cursor.
+                Tree::visit_all(root, root, true, |node| {
+                    let n = node.borrow();
+                    if !n.outer_clipped.contains(next_position) {
+                        // Skip the entire sub-tree, because it doesn't contain the cursor.
+                        return VisitControl::SkipChildren;
+                    }
+                    hovered_node = Some(node);
+                    if n.attributes.focusable {
+                        focused_node = Some(node);
+                    }
+                    VisitControl::Continue
+                });
+
+                // This root/window contains the cursor.
+                // We don't care about any lower roots.
+                if hovered_node.is_some() {
+                    break;
+                }
+
+                // This root is modal and swallows all clicks,
+                // no matter whether the click was inside it or not.
+                if matches!(root.borrow().content, NodeContent::Modal(_)) {
+                    break;
+                }
+            }
+        }
+
+        if is_scroll {
+            next_state = self.mouse_state;
+        } else if is_drag {
+            self.mouse_is_drag = true;
+        } else if mouse_down {
+            // Transition from no mouse input to some mouse input --> Record the mouse down position.
+            Self::build_node_path(hovered_node, &mut self.mouse_down_node_path);
+
+            // On left-mouse-down we change focus.
+            let mut target = 0;
+            if next_state == InputMouseState::Left {
+                target = focused_node.map_or(0, |n| n.borrow().id);
+                Self::build_node_path(focused_node, &mut self.focused_node_path);
+                self.needs_more_settling(); // See `needs_more_settling()`.
+            }
+
+            // Double-/Triple-/Etc.-clicks are triggered on mouse-down,
+            // unlike the first initial click, which is triggered on mouse-up.
+            if self.mouse_click_counter != 0 {
+                if self.first_click_target != target
+                    || self.first_click_position != next_position
+                    || (now - self.mouse_up_timestamp) > std::time::Duration::from_millis(500)
+                {
+                    // If the cursor moved / the focus changed in between, or if the user did a slow click,
+                    // we reset the click counter. On mouse-up it'll transition to a regular click.
+                    self.mouse_click_counter = 0;
+                    self.first_click_position = Point::MIN;
+                    self.first_click_target = 0;
+                } else {
+                    self.mouse_click_counter += 1;
+                    frame.mouse_click = self.mouse_click_counter;
+                };
+            }
+
+            // Gets reset at the start of this function.
+            self.left_mouse_down_target = target;
+            self.mouse_down_position = next_position;
+        } else if mouse_up {
+            // Transition from some mouse input to no mouse input --> The mouse button was released.
+            next_state = InputMouseState::Release;
+
+            let target = focused_node.map_or(0, |n| n.borrow().id);
+
+            if self.left_mouse_down_target == 0 || self.left_mouse_down_target != target {
+                // If `left_mouse_down_target == 0`, then it wasn't a left-click, in which case
+                // the target gets reset. Same, if the focus changed in between any clicks.
+                self.mouse_click_counter = 0;
+                self.first_click_position = Point::MIN;
+                self.first_click_target = 0;
+            } else if self.mouse_click_counter == 0 {
+                // No focus change, and no previous clicks? This is an initial, regular click.
+                self.mouse_click_counter = 1;
+                self.first_click_position = self.mouse_down_position;
+                self.first_click_target = target;
+                frame.mouse_click = 1;
+            }
+
+            self.mouse_up_timestamp = now;
+        }
+
+        frame.mouse_modifiers = mouse.modifiers;
+        frame.scroll_delta = next_scroll;
+        self.mouse_position = next_position;
+        self.mouse_state = next_state;
     }
 
     fn report_context_completion<'a>(&'a mut self, ctx: &mut Context<'a, '_>) {
@@ -2225,121 +2265,14 @@ impl<'a> Context<'a, '_> {
         let mut make_cursor_visible = false;
         let mut change_preferred_column = false;
 
-        // Scrolling works even if the node isn't focused.
-        if self.input_scroll_delta != Point::default()
-            && node_prev.inner_clipped.contains(self.tui.mouse_position)
-        {
-            tc.scroll_offset.x += self.input_scroll_delta.x;
-            tc.scroll_offset.y += self.input_scroll_delta.y;
-            self.set_input_consumed();
-            return make_cursor_visible;
-        } else if self.tui.mouse_state != InputMouseState::None
-            && self.tui.is_node_focused(node_prev.id)
-        {
-            let mouse = self.tui.mouse_position;
-            let inner = node_prev.inner;
-            let text_rect = Rect {
-                left: inner.left + tb.margin_width(),
-                top: inner.top,
-                right: inner.right - !single_line as CoordType,
-                bottom: inner.bottom,
-            };
-            let track_rect = Rect {
-                left: text_rect.right,
-                top: inner.top,
-                right: inner.right,
-                bottom: inner.bottom,
-            };
-            let pos = Point {
-                x: mouse.x - inner.left - tb.margin_width() + tc.scroll_offset.x,
-                y: mouse.y - inner.top + tc.scroll_offset.y,
-            };
-
-            if text_rect.contains(self.tui.mouse_down_position) {
-                if self.tui.mouse_is_drag {
-                    tb.selection_update_visual(pos);
-                    tc.preferred_column = tb.cursor_visual_pos().x;
-
-                    let height = inner.height();
-
-                    // If the editor is only 1 line tall we can't possibly scroll up or down.
-                    if height >= 2 {
-                        fn calc(min: CoordType, max: CoordType, mouse: CoordType) -> CoordType {
-                            // Otherwise, the scroll zone is up to 3 lines at the top/bottom.
-                            let zone_height = ((max - min) / 2).min(3);
-
-                            // The .y positions where the scroll zones begin:
-                            // Mouse coordinates above top and below bottom respectively.
-                            let scroll_min = min + zone_height;
-                            let scroll_max = max - zone_height - 1;
-
-                            // Calculate the delta for scrolling up or down.
-                            let delta_min = (mouse - scroll_min).clamp(-zone_height, 0);
-                            let delta_max = (mouse - scroll_max).clamp(0, zone_height);
-
-                            // If I didn't mess up my logic here, only one of the two values can possibly be !=0.
-                            let idx = 3 + delta_min + delta_max;
-
-                            const SPEEDS: [CoordType; 7] = [-9, -3, -1, 0, 1, 3, 9];
-                            let idx = idx.clamp(0, SPEEDS.len() as CoordType) as usize;
-                            SPEEDS[idx]
-                        }
-
-                        let delta_x = calc(text_rect.left, text_rect.right, mouse.x);
-                        let delta_y = calc(text_rect.top, text_rect.bottom, mouse.y);
-
-                        tc.scroll_offset.x += delta_x;
-                        tc.scroll_offset.y += delta_y;
-
-                        if delta_x != 0 || delta_y != 0 {
-                            self.tui.read_timeout = time::Duration::from_millis(25);
-                        }
-                    }
-                } else {
-                    match self.input_mouse_click {
-                        5.. => {}
-                        4 => tb.select_all(),
-                        3 => tb.select_line(),
-                        2 => tb.select_word(),
-                        _ => match self.tui.mouse_state {
-                            InputMouseState::Left => {
-                                if self.input_mouse_modifiers.contains(kbmod::SHIFT) {
-                                    // TODO: Untested because Windows Terminal surprisingly doesn't support Shift+Click.
-                                    tb.selection_update_visual(pos);
-                                } else {
-                                    tb.cursor_move_to_visual(pos);
-                                }
-                                tc.preferred_column = tb.cursor_visual_pos().x;
-                                make_cursor_visible = true;
-                            }
-                            _ => return false,
-                        },
-                    }
-                }
-            } else if track_rect.contains(self.tui.mouse_down_position) {
-                if self.tui.mouse_state == InputMouseState::Release {
-                    tc.scroll_offset_y_drag_start = CoordType::MIN;
-                } else if self.tui.mouse_is_drag {
-                    if tc.scroll_offset_y_drag_start == CoordType::MIN {
-                        tc.scroll_offset_y_drag_start = tc.scroll_offset.y;
-                    }
-
-                    // The textarea supports 1 height worth of "scrolling beyond the end".
-                    // `track_height` is the same as the viewport height.
-                    let scrollable_height = tb.visual_line_count() - 1;
-
-                    if scrollable_height > 0 {
-                        let trackable = track_rect.height() - tc.thumb_height;
-                        let delta_y = mouse.y - self.tui.mouse_down_position.y;
-                        tc.scroll_offset.y = tc.scroll_offset_y_drag_start
-                            + (delta_y as i64 * scrollable_height as i64 / trackable as i64)
-                                as CoordType;
-                    }
-                }
-            }
-
-            self.set_input_consumed();
-            return make_cursor_visible;
+        if let Some(result) = self.textarea_handle_pointer_input(
+            tc,
+            node_prev,
+            single_line,
+            tb,
+            &mut make_cursor_visible,
+        ) {
+            return result;
         }
 
         if !tc.has_focus {
@@ -2351,391 +2284,16 @@ impl<'a> Context<'a, '_> {
         if let Some(input) = &self.input_text {
             write = input.as_bytes();
         } else if let Some(input) = &self.input_keyboard {
-            let key = input.key();
-            let modifiers = input.modifiers();
-
-            make_cursor_visible = true;
-
-            match key {
-                vk::BACK => {
-                    let granularity = if modifiers == kbmod::CTRL {
-                        CursorMovement::Word
-                    } else {
-                        CursorMovement::Grapheme
-                    };
-                    tb.delete_all(granularity, -1);
-                }
-                vk::TAB => {
-                    if single_line {
-                        // If this is just a simple input field, don't consume Tab (= early return).
-                        return false;
-                    }
-                    tb.indent_change(if modifiers == kbmod::SHIFT { -1 } else { 1 });
-                }
-                vk::RETURN => {
-                    if single_line {
-                        // If this is just a simple input field, don't consume Enter (= early return).
-                        return false;
-                    }
-                    write = b"\n";
-                }
-                vk::ESCAPE => {
-                    // First, clear block selection if present
-                    if tb.has_block_selection() {
-                        tb.clear_block_selection();
-                    } else if tb.has_multiple_cursors() {
-                        // Then, collapse multiple cursors if present
-                        tb.collapse_cursors();
-                    } else if !tb.clear_selection() {
-                        // If there was a selection, clear it and show the cursor (= fallthrough).
-                        if single_line {
-                            // If this is just a simple input field, don't consume the escape key
-                            // (early return) and don't show the cursor (= return false).
-                            return false;
-                        }
-
-                        // If this is a textarea, don't show the cursor if
-                        // the escape key was pressed and nothing happened.
-                        make_cursor_visible = false;
-                    }
-                }
-                vk::PRIOR => {
-                    let height = node_prev.inner.height() - 1;
-
-                    // If the cursor was already on the first line,
-                    // move it to the start of the buffer.
-                    if tb.cursor_visual_pos().y == 0 {
-                        tc.preferred_column = 0;
-                    }
-
-                    if modifiers == kbmod::SHIFT {
-                        tb.selection_update_visual(Point {
-                            x: tc.preferred_column,
-                            y: tb.cursor_visual_pos().y - height,
-                        });
-                    } else {
-                        tb.cursor_move_to_visual(Point {
-                            x: tc.preferred_column,
-                            y: tb.cursor_visual_pos().y - height,
-                        });
-                    }
-                }
-                vk::NEXT => {
-                    let height = node_prev.inner.height() - 1;
-
-                    // If the cursor was already on the last line,
-                    // move it to the end of the buffer.
-                    if tb.cursor_visual_pos().y >= tb.visual_line_count() - 1 {
-                        tc.preferred_column = CoordType::MAX;
-                    }
-
-                    if modifiers == kbmod::SHIFT {
-                        tb.selection_update_visual(Point {
-                            x: tc.preferred_column,
-                            y: tb.cursor_visual_pos().y + height,
-                        });
-                    } else {
-                        tb.cursor_move_to_visual(Point {
-                            x: tc.preferred_column,
-                            y: tb.cursor_visual_pos().y + height,
-                        });
-                    }
-
-                    if tc.preferred_column == CoordType::MAX {
-                        tc.preferred_column = tb.cursor_visual_pos().x;
-                    }
-                }
-                vk::END => {
-                    let logical_before = tb.cursor_logical_pos();
-                    let destination = if modifiers.contains(kbmod::CTRL) {
-                        Point::MAX
-                    } else {
-                        Point { x: CoordType::MAX, y: tb.cursor_visual_pos().y }
-                    };
-
-                    if modifiers.contains(kbmod::SHIFT) {
-                        tb.selection_update_visual(destination);
-                    } else {
-                        tb.cursor_move_to_visual(destination);
-                    }
-
-                    if !modifiers.contains(kbmod::CTRL) {
-                        let logical_after = tb.cursor_logical_pos();
-
-                        // If word-wrap is enabled and the user presses End the first time,
-                        // it moves to the start of the visual line. The second time they
-                        // press it, it moves to the start of the logical line.
-                        if tb.is_word_wrap_enabled() && logical_after == logical_before {
-                            if modifiers == kbmod::SHIFT {
-                                tb.selection_update_logical(Point {
-                                    x: CoordType::MAX,
-                                    y: tb.cursor_logical_pos().y,
-                                });
-                            } else {
-                                tb.cursor_move_to_logical(Point {
-                                    x: CoordType::MAX,
-                                    y: tb.cursor_logical_pos().y,
-                                });
-                            }
-                        }
-                    }
-                }
-                vk::HOME => {
-                    let logical_before = tb.cursor_logical_pos();
-                    let destination = if modifiers.contains(kbmod::CTRL) {
-                        Default::default()
-                    } else {
-                        Point { x: 0, y: tb.cursor_visual_pos().y }
-                    };
-
-                    if modifiers.contains(kbmod::SHIFT) {
-                        tb.selection_update_visual(destination);
-                    } else {
-                        tb.cursor_move_to_visual(destination);
-                    }
-
-                    if !modifiers.contains(kbmod::CTRL) {
-                        let mut logical_after = tb.cursor_logical_pos();
-
-                        // If word-wrap is enabled and the user presses Home the first time,
-                        // it moves to the start of the visual line. The second time they
-                        // press it, it moves to the start of the logical line.
-                        if tb.is_word_wrap_enabled() && logical_after == logical_before {
-                            if modifiers == kbmod::SHIFT {
-                                tb.selection_update_logical(Point {
-                                    x: 0,
-                                    y: tb.cursor_logical_pos().y,
-                                });
-                            } else {
-                                tb.cursor_move_to_logical(Point {
-                                    x: 0,
-                                    y: tb.cursor_logical_pos().y,
-                                });
-                            }
-                            logical_after = tb.cursor_logical_pos();
-                        }
-
-                        // If the line has some indentation and the user pressed Home,
-                        // the first time it'll stop at the indentation. The second time
-                        // they press it, it'll move to the true start of the line.
-                        //
-                        // If the cursor is already at the start of the line,
-                        // we move it back to the end of the indentation.
-                        if logical_after.x == 0
-                            && let indent_end = tb.indent_end_logical_pos()
-                            && (logical_before > indent_end || logical_before.x == 0)
-                        {
-                            if modifiers == kbmod::SHIFT {
-                                tb.selection_update_logical(indent_end);
-                            } else {
-                                tb.cursor_move_to_logical(indent_end);
-                            }
-                        }
-                    }
-                }
-                vk::LEFT => {
-                    if modifiers == kbmod::ALT_SHIFT {
-                        tb.block_selection_extend(-1, 0);
-                    } else {
-                        let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
-                            CursorMovement::Word
-                        } else {
-                            CursorMovement::Grapheme
-                        };
-                        if modifiers.contains(kbmod::SHIFT) {
-                            tb.selection_update_delta(granularity, -1);
-                        } else if let Some((beg, _)) = tb.selection_range() {
-                            unsafe { tb.set_cursor(beg) };
-                        } else {
-                            tb.cursor_move_delta(granularity, -1);
-                        }
-                    }
-                }
-                vk::UP => {
-                    if single_line {
-                        return false;
-                    }
-                    match modifiers {
-                        kbmod::NONE => {
-                            let mut x = tc.preferred_column;
-                            let mut y = tb.cursor_visual_pos().y - 1;
-
-                            // If there's a selection we put the cursor above it.
-                            if let Some((beg, _)) = tb.selection_range() {
-                                x = beg.visual_pos.x;
-                                y = beg.visual_pos.y - 1;
-                                tc.preferred_column = x;
-                            }
-
-                            // If the cursor was already on the first line,
-                            // move it to the start of the buffer.
-                            if y < 0 {
-                                x = 0;
-                                tc.preferred_column = 0;
-                            }
-
-                            tb.cursor_move_to_visual(Point { x, y });
-                        }
-                        kbmod::CTRL => {
-                            tc.scroll_offset.y -= 1;
-                            make_cursor_visible = false;
-                        }
-                        kbmod::SHIFT => {
-                            // If the cursor was already on the first line,
-                            // move it to the start of the buffer.
-                            if tb.cursor_visual_pos().y == 0 {
-                                tc.preferred_column = 0;
-                            }
-
-                            tb.selection_update_visual(Point {
-                                x: tc.preferred_column,
-                                y: tb.cursor_visual_pos().y - 1,
-                            });
-                        }
-                        kbmod::ALT => tb.move_selected_lines(MoveLineDirection::Up),
-                        kbmod::CTRL_ALT => tb.add_cursor_above(),
-                        kbmod::ALT_SHIFT => tb.block_selection_extend(0, -1),
-                        _ => return false,
-                    }
-                }
-                vk::RIGHT => {
-                    if modifiers == kbmod::ALT_SHIFT {
-                        tb.block_selection_extend(1, 0);
-                    } else {
-                        let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
-                            CursorMovement::Word
-                        } else {
-                            CursorMovement::Grapheme
-                        };
-                        if modifiers.contains(kbmod::SHIFT) {
-                            tb.selection_update_delta(granularity, 1);
-                        } else if let Some((_, end)) = tb.selection_range() {
-                            unsafe { tb.set_cursor(end) };
-                        } else {
-                            tb.cursor_move_delta(granularity, 1);
-                        }
-                    }
-                }
-                vk::DOWN => {
-                    if single_line {
-                        return false;
-                    }
-                    match modifiers {
-                        kbmod::NONE => {
-                            let mut x = tc.preferred_column;
-                            let mut y = tb.cursor_visual_pos().y + 1;
-
-                            // If there's a selection we put the cursor below it.
-                            if let Some((_, end)) = tb.selection_range() {
-                                x = end.visual_pos.x;
-                                y = end.visual_pos.y + 1;
-                                tc.preferred_column = x;
-                            }
-
-                            // If the cursor was already on the last line,
-                            // move it to the end of the buffer.
-                            if y >= tb.visual_line_count() {
-                                x = CoordType::MAX;
-                            }
-
-                            tb.cursor_move_to_visual(Point { x, y });
-
-                            // If we fell into the `if y >= tb.get_visual_line_count()` above, we wanted to
-                            // update the `preferred_column` but didn't know yet what it was. Now we know!
-                            if x == CoordType::MAX {
-                                tc.preferred_column = tb.cursor_visual_pos().x;
-                            }
-                        }
-                        kbmod::CTRL => {
-                            tc.scroll_offset.y += 1;
-                            make_cursor_visible = false;
-                        }
-                        kbmod::SHIFT => {
-                            // If the cursor was already on the last line,
-                            // move it to the end of the buffer.
-                            if tb.cursor_visual_pos().y >= tb.visual_line_count() - 1 {
-                                tc.preferred_column = CoordType::MAX;
-                            }
-
-                            tb.selection_update_visual(Point {
-                                x: tc.preferred_column,
-                                y: tb.cursor_visual_pos().y + 1,
-                            });
-
-                            if tc.preferred_column == CoordType::MAX {
-                                tc.preferred_column = tb.cursor_visual_pos().x;
-                            }
-                        }
-                        kbmod::ALT => tb.move_selected_lines(MoveLineDirection::Down),
-                        kbmod::CTRL_ALT => tb.add_cursor_below(),
-                        kbmod::ALT_SHIFT => tb.block_selection_extend(0, 1),
-                        _ => return false,
-                    }
-                }
-                vk::INSERT => match modifiers {
-                    kbmod::SHIFT => tb.paste(self.clipboard_ref()),
-                    kbmod::CTRL => tb.copy(self.clipboard_mut()),
-                    _ => tb.set_overtype(!tb.is_overtype()),
-                },
-                vk::DELETE => match modifiers {
-                    kbmod::SHIFT => tb.cut(self.clipboard_mut()),
-                    kbmod::CTRL => tb.delete_all(CursorMovement::Word, 1),
-                    _ => tb.delete_all(CursorMovement::Grapheme, 1),
-                },
-                vk::A => match modifiers {
-                    kbmod::CTRL => tb.select_all(),
-                    _ => return false,
-                },
-                vk::B => match modifiers {
-                    kbmod::ALT if cfg!(target_os = "macos") => {
-                        // On macOS, terminals commonly emit the Emacs style
-                        // Alt+B (ESC b) sequence for Alt+Left.
-                        tb.cursor_move_delta(CursorMovement::Word, -1);
-                    }
-                    _ => return false,
-                },
-                vk::F => match modifiers {
-                    kbmod::ALT if cfg!(target_os = "macos") => {
-                        // On macOS, terminals commonly emit the Emacs style
-                        // Alt+F (ESC f) sequence for Alt+Right.
-                        tb.cursor_move_delta(CursorMovement::Word, 1);
-                    }
-                    _ => return false,
-                },
-                vk::H => match modifiers {
-                    kbmod::CTRL => tb.delete_all(CursorMovement::Word, -1),
-                    _ => return false,
-                },
-                vk::L => match modifiers {
-                    kbmod::CTRL => tb.select_line(),
-                    _ => return false,
-                },
-                vk::X => match modifiers {
-                    kbmod::CTRL => tb.cut(self.clipboard_mut()),
-                    _ => return false,
-                },
-                vk::C => match modifiers {
-                    kbmod::CTRL => tb.copy(self.clipboard_mut()),
-                    _ => return false,
-                },
-                vk::V => match modifiers {
-                    kbmod::CTRL => tb.paste(self.clipboard_ref()),
-                    _ => return false,
-                },
-                vk::Y => match modifiers {
-                    kbmod::CTRL => tb.redo(),
-                    _ => return false,
-                },
-                vk::Z => match modifiers {
-                    kbmod::CTRL => tb.undo(),
-                    kbmod::CTRL_SHIFT => tb.redo(),
-                    kbmod::ALT => tb.set_word_wrap(!tb.is_word_wrap_enabled()),
-                    _ => return false,
-                },
-                _ => return false,
+            let Some(dispatch) =
+                self.textarea_dispatch_keyboard_input(tc, node_prev, single_line, tb, *input)
+            else {
+                return false;
+            };
+            if dispatch.write_newline {
+                write = b"\n";
             }
-
-            change_preferred_column = !matches!(key, vk::PRIOR | vk::NEXT | vk::UP | vk::DOWN);
+            make_cursor_visible = dispatch.make_cursor_visible;
+            change_preferred_column = dispatch.change_preferred_column;
         } else {
             return false;
         }
@@ -2756,6 +2314,598 @@ impl<'a> Context<'a, '_> {
 
         self.set_input_consumed();
         make_cursor_visible
+    }
+
+    fn textarea_dispatch_keyboard_input(
+        &mut self,
+        tc: &mut TextareaContent,
+        node_prev: &Node,
+        single_line: bool,
+        tb: &mut TextBuffer,
+        input: InputKey,
+    ) -> Option<TextareaKeyboardDispatch> {
+        let key = input.key();
+        let modifiers = input.modifiers();
+        let mut write: &[u8] = &[];
+        let mut make_cursor_visible = true;
+
+        match key {
+            vk::BACK | vk::TAB | vk::RETURN | vk::ESCAPE => {
+                match self.textarea_handle_basic_key(
+                    tb,
+                    key,
+                    modifiers,
+                    single_line,
+                    &mut write,
+                    &mut make_cursor_visible,
+                ) {
+                    TextareaBasicKeyOutcome::Handled => {}
+                    TextareaBasicKeyOutcome::Reject => return None,
+                }
+            }
+            vk::PRIOR | vk::NEXT | vk::END | vk::HOME => {
+                self.textarea_handle_jump_navigation(tb, tc, node_prev, key, modifiers);
+            }
+            vk::LEFT => self.textarea_handle_horizontal_arrow(tb, modifiers, -1),
+            vk::UP => {
+                if !self.textarea_handle_vertical_arrow(
+                    tc,
+                    tb,
+                    single_line,
+                    modifiers,
+                    -1,
+                    &mut make_cursor_visible,
+                ) {
+                    return None;
+                }
+            }
+            vk::RIGHT => self.textarea_handle_horizontal_arrow(tb, modifiers, 1),
+            vk::DOWN => {
+                if !self.textarea_handle_vertical_arrow(
+                    tc,
+                    tb,
+                    single_line,
+                    modifiers,
+                    1,
+                    &mut make_cursor_visible,
+                ) {
+                    return None;
+                }
+            }
+            vk::INSERT | vk::DELETE => self.textarea_handle_insert_delete(tb, key, modifiers),
+            vk::A | vk::B | vk::F | vk::H | vk::L | vk::X | vk::C | vk::V | vk::Y | vk::Z => {
+                if !self.textarea_handle_edit_shortcut_key(tb, key, modifiers) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+
+        Some(TextareaKeyboardDispatch {
+            change_preferred_column: !matches!(key, vk::PRIOR | vk::NEXT | vk::UP | vk::DOWN),
+            write_newline: !write.is_empty(),
+            make_cursor_visible,
+        })
+    }
+
+    fn textarea_handle_basic_key(
+        &mut self,
+        tb: &mut TextBuffer,
+        key: InputKey,
+        modifiers: InputKeyMod,
+        single_line: bool,
+        write: &mut &[u8],
+        make_cursor_visible: &mut bool,
+    ) -> TextareaBasicKeyOutcome {
+        match key {
+            vk::BACK => {
+                let granularity = if modifiers == kbmod::CTRL {
+                    CursorMovement::Word
+                } else {
+                    CursorMovement::Grapheme
+                };
+                tb.delete_all(granularity, -1);
+                TextareaBasicKeyOutcome::Handled
+            }
+            vk::TAB => {
+                if single_line {
+                    // If this is just a simple input field, don't consume Tab (= early return).
+                    return TextareaBasicKeyOutcome::Reject;
+                }
+                tb.indent_change(if modifiers == kbmod::SHIFT { -1 } else { 1 });
+                TextareaBasicKeyOutcome::Handled
+            }
+            vk::RETURN => {
+                if single_line {
+                    // If this is just a simple input field, don't consume Enter (= early return).
+                    return TextareaBasicKeyOutcome::Reject;
+                }
+                *write = b"\n";
+                TextareaBasicKeyOutcome::Handled
+            }
+            vk::ESCAPE => {
+                // First, clear block selection if present.
+                if tb.has_block_selection() {
+                    tb.clear_block_selection();
+                } else if tb.has_multiple_cursors() {
+                    // Then, collapse multiple cursors if present.
+                    tb.collapse_cursors();
+                } else if !tb.clear_selection() {
+                    // If there was a selection, clear it and show the cursor (= fallthrough).
+                    if single_line {
+                        // If this is just a simple input field, don't consume the escape key.
+                        return TextareaBasicKeyOutcome::Reject;
+                    }
+
+                    // If this is a textarea, don't show the cursor if
+                    // the escape key was pressed and nothing happened.
+                    *make_cursor_visible = false;
+                }
+                TextareaBasicKeyOutcome::Handled
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn textarea_handle_horizontal_arrow(
+        &mut self,
+        tb: &mut TextBuffer,
+        modifiers: InputKeyMod,
+        delta: CoordType,
+    ) {
+        if modifiers == kbmod::ALT_SHIFT {
+            tb.block_selection_extend(delta, 0);
+            return;
+        }
+
+        let granularity = if modifiers.contains(KBMOD_FOR_WORD_NAV) {
+            CursorMovement::Word
+        } else {
+            CursorMovement::Grapheme
+        };
+
+        if modifiers.contains(kbmod::SHIFT) {
+            tb.selection_update_delta(granularity, delta);
+        } else if let Some((beg, end)) = tb.selection_range() {
+            unsafe { tb.set_cursor(if delta < 0 { beg } else { end }) };
+        } else {
+            tb.cursor_move_delta(granularity, delta);
+        }
+    }
+
+    fn textarea_handle_edit_shortcut_key(
+        &mut self,
+        tb: &mut TextBuffer,
+        key: InputKey,
+        modifiers: InputKeyMod,
+    ) -> bool {
+        match key {
+            vk::A => matches!(modifiers, kbmod::CTRL).then(|| tb.select_all()).is_some(),
+            vk::B => {
+                if modifiers == kbmod::ALT && cfg!(target_os = "macos") {
+                    // On macOS, terminals commonly emit the Emacs style
+                    // Alt+B (ESC b) sequence for Alt+Left.
+                    tb.cursor_move_delta(CursorMovement::Word, -1);
+                    true
+                } else {
+                    false
+                }
+            }
+            vk::F => {
+                if modifiers == kbmod::ALT && cfg!(target_os = "macos") {
+                    // On macOS, terminals commonly emit the Emacs style
+                    // Alt+F (ESC f) sequence for Alt+Right.
+                    tb.cursor_move_delta(CursorMovement::Word, 1);
+                    true
+                } else {
+                    false
+                }
+            }
+            vk::H => matches!(modifiers, kbmod::CTRL)
+                .then(|| tb.delete_all(CursorMovement::Word, -1))
+                .is_some(),
+            vk::L => matches!(modifiers, kbmod::CTRL).then(|| tb.select_line()).is_some(),
+            vk::X => {
+                matches!(modifiers, kbmod::CTRL).then(|| tb.cut(self.clipboard_mut())).is_some()
+            }
+            vk::C => {
+                matches!(modifiers, kbmod::CTRL).then(|| tb.copy(self.clipboard_mut())).is_some()
+            }
+            vk::V => {
+                matches!(modifiers, kbmod::CTRL).then(|| tb.paste(self.clipboard_ref())).is_some()
+            }
+            vk::Y => matches!(modifiers, kbmod::CTRL).then(|| tb.redo()).is_some(),
+            vk::Z => match modifiers {
+                kbmod::CTRL => {
+                    tb.undo();
+                    true
+                }
+                kbmod::CTRL_SHIFT => {
+                    tb.redo();
+                    true
+                }
+                kbmod::ALT => {
+                    tb.set_word_wrap(!tb.is_word_wrap_enabled());
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn textarea_handle_insert_delete(
+        &mut self,
+        tb: &mut TextBuffer,
+        key: InputKey,
+        modifiers: InputKeyMod,
+    ) {
+        match key {
+            vk::INSERT => match modifiers {
+                kbmod::SHIFT => tb.paste(self.clipboard_ref()),
+                kbmod::CTRL => tb.copy(self.clipboard_mut()),
+                _ => tb.set_overtype(!tb.is_overtype()),
+            },
+            vk::DELETE => match modifiers {
+                kbmod::SHIFT => tb.cut(self.clipboard_mut()),
+                kbmod::CTRL => tb.delete_all(CursorMovement::Word, 1),
+                _ => tb.delete_all(CursorMovement::Grapheme, 1),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn textarea_handle_jump_navigation(
+        &mut self,
+        tb: &mut TextBuffer,
+        tc: &mut TextareaContent,
+        node_prev: &Node,
+        key: InputKey,
+        modifiers: InputKeyMod,
+    ) {
+        match key {
+            vk::PRIOR => {
+                let height = node_prev.inner.height() - 1;
+
+                // If the cursor was already on the first line,
+                // move it to the start of the buffer.
+                if tb.cursor_visual_pos().y == 0 {
+                    tc.preferred_column = 0;
+                }
+
+                if modifiers == kbmod::SHIFT {
+                    tb.selection_update_visual(Point {
+                        x: tc.preferred_column,
+                        y: tb.cursor_visual_pos().y - height,
+                    });
+                } else {
+                    tb.cursor_move_to_visual(Point {
+                        x: tc.preferred_column,
+                        y: tb.cursor_visual_pos().y - height,
+                    });
+                }
+            }
+            vk::NEXT => {
+                let height = node_prev.inner.height() - 1;
+
+                // If the cursor was already on the last line,
+                // move it to the end of the buffer.
+                if tb.cursor_visual_pos().y >= tb.visual_line_count() - 1 {
+                    tc.preferred_column = CoordType::MAX;
+                }
+
+                if modifiers == kbmod::SHIFT {
+                    tb.selection_update_visual(Point {
+                        x: tc.preferred_column,
+                        y: tb.cursor_visual_pos().y + height,
+                    });
+                } else {
+                    tb.cursor_move_to_visual(Point {
+                        x: tc.preferred_column,
+                        y: tb.cursor_visual_pos().y + height,
+                    });
+                }
+
+                if tc.preferred_column == CoordType::MAX {
+                    tc.preferred_column = tb.cursor_visual_pos().x;
+                }
+            }
+            vk::END => {
+                let logical_before = tb.cursor_logical_pos();
+                let destination = if modifiers.contains(kbmod::CTRL) {
+                    Point::MAX
+                } else {
+                    Point { x: CoordType::MAX, y: tb.cursor_visual_pos().y }
+                };
+
+                if modifiers.contains(kbmod::SHIFT) {
+                    tb.selection_update_visual(destination);
+                } else {
+                    tb.cursor_move_to_visual(destination);
+                }
+
+                if !modifiers.contains(kbmod::CTRL) {
+                    let logical_after = tb.cursor_logical_pos();
+
+                    // If word-wrap is enabled and the user presses End the first time,
+                    // it moves to the start of the visual line. The second time they
+                    // press it, it moves to the start of the logical line.
+                    if tb.is_word_wrap_enabled() && logical_after == logical_before {
+                        if modifiers == kbmod::SHIFT {
+                            tb.selection_update_logical(Point {
+                                x: CoordType::MAX,
+                                y: tb.cursor_logical_pos().y,
+                            });
+                        } else {
+                            tb.cursor_move_to_logical(Point {
+                                x: CoordType::MAX,
+                                y: tb.cursor_logical_pos().y,
+                            });
+                        }
+                    }
+                }
+            }
+            vk::HOME => {
+                let logical_before = tb.cursor_logical_pos();
+                let destination = if modifiers.contains(kbmod::CTRL) {
+                    Default::default()
+                } else {
+                    Point { x: 0, y: tb.cursor_visual_pos().y }
+                };
+
+                if modifiers.contains(kbmod::SHIFT) {
+                    tb.selection_update_visual(destination);
+                } else {
+                    tb.cursor_move_to_visual(destination);
+                }
+
+                if !modifiers.contains(kbmod::CTRL) {
+                    let mut logical_after = tb.cursor_logical_pos();
+
+                    // If word-wrap is enabled and the user presses Home the first time,
+                    // it moves to the start of the visual line. The second time they
+                    // press it, it moves to the start of the logical line.
+                    if tb.is_word_wrap_enabled() && logical_after == logical_before {
+                        if modifiers == kbmod::SHIFT {
+                            tb.selection_update_logical(Point {
+                                x: 0,
+                                y: tb.cursor_logical_pos().y,
+                            });
+                        } else {
+                            tb.cursor_move_to_logical(Point { x: 0, y: tb.cursor_logical_pos().y });
+                        }
+                        logical_after = tb.cursor_logical_pos();
+                    }
+
+                    // If the line has some indentation and the user pressed Home,
+                    // the first time it'll stop at the indentation. The second time
+                    // they press it, it'll move to the true start of the line.
+                    //
+                    // If the cursor is already at the start of the line,
+                    // we move it back to the end of the indentation.
+                    if logical_after.x == 0
+                        && let indent_end = tb.indent_end_logical_pos()
+                        && (logical_before > indent_end || logical_before.x == 0)
+                    {
+                        if modifiers == kbmod::SHIFT {
+                            tb.selection_update_logical(indent_end);
+                        } else {
+                            tb.cursor_move_to_logical(indent_end);
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn textarea_handle_vertical_arrow(
+        &mut self,
+        tc: &mut TextareaContent,
+        tb: &mut TextBuffer,
+        single_line: bool,
+        modifiers: InputKeyMod,
+        delta: CoordType,
+        make_cursor_visible: &mut bool,
+    ) -> bool {
+        if single_line {
+            return false;
+        }
+
+        match modifiers {
+            kbmod::NONE => {
+                let mut x = tc.preferred_column;
+                let mut y = tb.cursor_visual_pos().y + delta;
+
+                if let Some((beg, end)) = tb.selection_range() {
+                    let target = if delta < 0 { beg } else { end };
+                    x = target.visual_pos.x;
+                    y = target.visual_pos.y + delta;
+                    tc.preferred_column = x;
+                }
+
+                if y < 0 {
+                    x = 0;
+                    tc.preferred_column = 0;
+                } else if y >= tb.visual_line_count() {
+                    x = CoordType::MAX;
+                }
+
+                tb.cursor_move_to_visual(Point { x, y });
+
+                // If moving down to end-of-buffer, resolve preferred column to the actual cursor x.
+                if delta > 0 && x == CoordType::MAX {
+                    tc.preferred_column = tb.cursor_visual_pos().x;
+                }
+            }
+            kbmod::CTRL => {
+                tc.scroll_offset.y += delta;
+                *make_cursor_visible = false;
+            }
+            kbmod::SHIFT => {
+                if delta < 0 && tb.cursor_visual_pos().y == 0 {
+                    tc.preferred_column = 0;
+                } else if delta > 0 && tb.cursor_visual_pos().y >= tb.visual_line_count() - 1 {
+                    tc.preferred_column = CoordType::MAX;
+                }
+
+                tb.selection_update_visual(Point {
+                    x: tc.preferred_column,
+                    y: tb.cursor_visual_pos().y + delta,
+                });
+
+                if delta > 0 && tc.preferred_column == CoordType::MAX {
+                    tc.preferred_column = tb.cursor_visual_pos().x;
+                }
+            }
+            kbmod::ALT => {
+                tb.move_selected_lines(if delta < 0 {
+                    MoveLineDirection::Up
+                } else {
+                    MoveLineDirection::Down
+                });
+            }
+            kbmod::CTRL_ALT => {
+                if delta < 0 {
+                    tb.add_cursor_above();
+                } else {
+                    tb.add_cursor_below();
+                }
+            }
+            kbmod::ALT_SHIFT => tb.block_selection_extend(0, delta),
+            _ => return false,
+        }
+
+        true
+    }
+
+    fn textarea_handle_pointer_input(
+        &mut self,
+        tc: &mut TextareaContent,
+        node_prev: &Node,
+        single_line: bool,
+        tb: &mut TextBuffer,
+        make_cursor_visible: &mut bool,
+    ) -> Option<bool> {
+        // Scrolling works even if the node isn't focused.
+        if self.input_scroll_delta != Point::default()
+            && node_prev.inner_clipped.contains(self.tui.mouse_position)
+        {
+            tc.scroll_offset.x += self.input_scroll_delta.x;
+            tc.scroll_offset.y += self.input_scroll_delta.y;
+            self.set_input_consumed();
+            return Some(*make_cursor_visible);
+        }
+
+        if self.tui.mouse_state == InputMouseState::None || !self.tui.is_node_focused(node_prev.id)
+        {
+            return None;
+        }
+
+        let mouse = self.tui.mouse_position;
+        let inner = node_prev.inner;
+        let text_rect = Rect {
+            left: inner.left + tb.margin_width(),
+            top: inner.top,
+            right: inner.right - !single_line as CoordType,
+            bottom: inner.bottom,
+        };
+        let track_rect = Rect {
+            left: text_rect.right,
+            top: inner.top,
+            right: inner.right,
+            bottom: inner.bottom,
+        };
+        let pos = Point {
+            x: mouse.x - inner.left - tb.margin_width() + tc.scroll_offset.x,
+            y: mouse.y - inner.top + tc.scroll_offset.y,
+        };
+
+        if text_rect.contains(self.tui.mouse_down_position) {
+            if self.tui.mouse_is_drag {
+                tb.selection_update_visual(pos);
+                tc.preferred_column = tb.cursor_visual_pos().x;
+
+                let height = inner.height();
+
+                // If the editor is only 1 line tall we can't possibly scroll up or down.
+                if height >= 2 {
+                    fn calc(min: CoordType, max: CoordType, mouse: CoordType) -> CoordType {
+                        // Otherwise, the scroll zone is up to 3 lines at the top/bottom.
+                        let zone_height = ((max - min) / 2).min(3);
+
+                        // The .y positions where the scroll zones begin:
+                        // Mouse coordinates above top and below bottom respectively.
+                        let scroll_min = min + zone_height;
+                        let scroll_max = max - zone_height - 1;
+
+                        // Calculate the delta for scrolling up or down.
+                        let delta_min = (mouse - scroll_min).clamp(-zone_height, 0);
+                        let delta_max = (mouse - scroll_max).clamp(0, zone_height);
+
+                        // If I didn't mess up my logic here, only one of the two values can possibly be !=0.
+                        let idx = 3 + delta_min + delta_max;
+
+                        const SPEEDS: [CoordType; 7] = [-9, -3, -1, 0, 1, 3, 9];
+                        let idx = idx.clamp(0, SPEEDS.len() as CoordType) as usize;
+                        SPEEDS[idx]
+                    }
+
+                    let delta_x = calc(text_rect.left, text_rect.right, mouse.x);
+                    let delta_y = calc(text_rect.top, text_rect.bottom, mouse.y);
+
+                    tc.scroll_offset.x += delta_x;
+                    tc.scroll_offset.y += delta_y;
+
+                    if delta_x != 0 || delta_y != 0 {
+                        self.tui.read_timeout = time::Duration::from_millis(25);
+                    }
+                }
+            } else {
+                match self.input_mouse_click {
+                    5.. => {}
+                    4 => tb.select_all(),
+                    3 => tb.select_line(),
+                    2 => tb.select_word(),
+                    _ => match self.tui.mouse_state {
+                        InputMouseState::Left => {
+                            if self.input_mouse_modifiers.contains(kbmod::SHIFT) {
+                                // TODO: Untested because Windows Terminal surprisingly doesn't support Shift+Click.
+                                tb.selection_update_visual(pos);
+                            } else {
+                                tb.cursor_move_to_visual(pos);
+                            }
+                            tc.preferred_column = tb.cursor_visual_pos().x;
+                            *make_cursor_visible = true;
+                        }
+                        _ => return Some(false),
+                    },
+                }
+            }
+        } else if track_rect.contains(self.tui.mouse_down_position) {
+            if self.tui.mouse_state == InputMouseState::Release {
+                tc.scroll_offset_y_drag_start = CoordType::MIN;
+            } else if self.tui.mouse_is_drag {
+                if tc.scroll_offset_y_drag_start == CoordType::MIN {
+                    tc.scroll_offset_y_drag_start = tc.scroll_offset.y;
+                }
+
+                // The textarea supports 1 height worth of "scrolling beyond the end".
+                // `track_height` is the same as the viewport height.
+                let scrollable_height = tb.visual_line_count() - 1;
+
+                if scrollable_height > 0 {
+                    let trackable = track_rect.height() - tc.thumb_height;
+                    let delta_y = mouse.y - self.tui.mouse_down_position.y;
+                    tc.scroll_offset.y = tc.scroll_offset_y_drag_start
+                        + (delta_y as i64 * scrollable_height as i64 / trackable as i64)
+                            as CoordType;
+                }
+            }
+        }
+
+        self.set_input_consumed();
+        Some(*make_cursor_visible)
     }
 
     fn textarea_make_cursor_visible(&self, tc: &mut TextareaContent, node_prev: &Node) {

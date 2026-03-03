@@ -6,7 +6,7 @@
 //! Read the `windows` module for reference.
 //! TODO: This reminds me that the sys API should probably be a trait.
 
-use std::ffi::{CStr, OsStr, OsString, c_char, c_int, c_void};
+use std::ffi::{CStr, OsStr, c_char, c_int, c_void};
 use std::fs::{self, File, OpenOptions};
 use std::mem::{self, ManuallyDrop, MaybeUninit};
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
@@ -375,24 +375,10 @@ where
     let file_name = path.file_name().unwrap_or_else(|| OsStr::new("edit32"));
     let perms = fs::metadata(path).ok().map(|meta| meta.permissions().mode());
 
-    const MAX_TMP_ATTEMPTS: u32 = 256;
     let mut attempt = 0u32;
     let (mut temp_path, mut temp_file) = loop {
         attempt = attempt.wrapping_add(1);
-        if attempt > MAX_TMP_ATTEMPTS {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "failed to create a unique temporary file for atomic write",
-            )
-            .into());
-        }
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
-        let mut name = OsString::from(file_name);
-        name.push(".tmp-");
-        name.push(format!("{}-{nonce:016x}-{attempt}", std::process::id()));
-        let candidate = parent.join(name);
+        let candidate = super::temp::atomic_temp_path(parent, file_name, attempt)?;
 
         match OpenOptions::new().write(true).create_new(true).open(&candidate) {
             Ok(file) => break (candidate, file),

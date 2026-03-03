@@ -3,6 +3,7 @@
 
 //! Platform abstractions.
 
+mod temp;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]

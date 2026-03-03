@@ -128,23 +128,11 @@ fn run() -> apperr::Result<()> {
             while {
                 let input = input_iter.next();
                 let more = input.is_some();
-                let mut apply_theme_now = false;
+                draw_frame(&mut tui, &mut state, input);
+
+                #[cfg(feature = "debug-latency")]
                 {
-                    let mut ctx = tui.create_context(input);
-
-                    draw(&mut ctx, &mut state);
-                    if state.needs_theme_refresh {
-                        ctx.needs_rerender();
-                        apply_theme_now = true;
-                    }
-
-                    #[cfg(feature = "debug-latency")]
-                    {
-                        passes += 1;
-                    }
-                }
-                if apply_theme_now {
-                    apply_theme(&mut tui, &mut state);
+                    passes += 1;
                 }
 
                 more
@@ -154,23 +142,11 @@ fn run() -> apperr::Result<()> {
         // Continue rendering until the layout has settled.
         // This can take >1 frame, if the input focus is tossed between different controls.
         while tui.needs_settling() {
-            let mut apply_theme_now = false;
+            draw_frame(&mut tui, &mut state, None);
+
+            #[cfg(feature = "debug-latency")]
             {
-                let mut ctx = tui.create_context(None);
-
-                draw(&mut ctx, &mut state);
-                if state.needs_theme_refresh {
-                    ctx.needs_rerender();
-                    apply_theme_now = true;
-                }
-
-                #[cfg(feature = "debug-latency")]
-                {
-                    passes += 1;
-                }
-            }
-            if apply_theme_now {
-                apply_theme(&mut tui, &mut state);
+                passes += 1;
             }
         }
 
@@ -178,61 +154,94 @@ fn run() -> apperr::Result<()> {
             break;
         }
 
-        // Render the UI and write it to the terminal.
-        {
-            let scratch = scratch_arena(None);
-            let mut output = tui.render(&scratch);
-
-            write_terminal_title(&mut output, &mut state);
-
-            if state.osc_clipboard_sync {
-                write_osc_clipboard(&mut tui, &mut state, &mut output);
-            }
-
-            #[cfg(feature = "debug-latency")]
-            {
-                // Print the number of passes and latency in the top right corner.
-                let time_end = std::time::Instant::now();
-                let status = time_end - time_beg;
-
-                let scratch_alt = scratch_arena(Some(&scratch));
-                let status = arena_format!(
-                    &scratch_alt,
-                    "{}P {}B {:.3}μs",
-                    passes,
-                    output.len(),
-                    status.as_nanos() as f64 / 1000.0
-                );
-
-                // "μs" is 3 bytes and 2 columns.
-                let cols = status.len() as edit::helpers::CoordType - 3 + 2;
-
-                // Since the status may shrink and grow, we may have to overwrite the previous one with whitespace.
-                let padding = (last_latency_width - cols).max(0);
-
-                // If the `output` is already very large,
-                // Rust may double the size during the write below.
-                // Let's avoid that by reserving the needed size in advance.
-                output.reserve_exact(128);
-
-                // To avoid moving the cursor, push and pop it onto the VT cursor stack.
-                _ = write!(
-                    output,
-                    "\x1b7\x1b[0;41;97m\x1b[1;{0}H{1:2$}{3}\x1b8",
-                    tui.size().width - cols - padding + 1,
-                    "",
-                    padding as usize,
-                    status
-                );
-
-                last_latency_width = cols;
-            }
-
-            sys::write_stdout(&output);
-        }
+        #[cfg(feature = "debug-latency")]
+        render_and_write_frame(&mut tui, &mut state, passes, time_beg, &mut last_latency_width);
+        #[cfg(not(feature = "debug-latency"))]
+        render_and_write_frame(&mut tui, &mut state);
     }
 
     Ok(())
+}
+
+fn draw_frame<'input>(tui: &mut Tui, state: &mut State, input: Option<input::Input<'input>>) {
+    let mut apply_theme_now = false;
+    {
+        let mut ctx = tui.create_context(input);
+        draw(&mut ctx, state);
+        if state.needs_theme_refresh {
+            ctx.needs_rerender();
+            apply_theme_now = true;
+        }
+    }
+    if apply_theme_now {
+        apply_theme(tui, state);
+    }
+}
+
+#[cfg(not(feature = "debug-latency"))]
+fn render_and_write_frame(tui: &mut Tui, state: &mut State) {
+    let scratch = scratch_arena(None);
+    let mut output = tui.render(&scratch);
+
+    write_terminal_title(&mut output, state);
+    if state.osc_clipboard_sync {
+        write_osc_clipboard(tui, state, &mut output);
+    }
+    sys::write_stdout(&output);
+}
+
+#[cfg(feature = "debug-latency")]
+fn render_and_write_frame(
+    tui: &mut Tui,
+    state: &mut State,
+    passes: usize,
+    time_beg: std::time::Instant,
+    last_latency_width: &mut CoordType,
+) {
+    let scratch = scratch_arena(None);
+    let mut output = tui.render(&scratch);
+
+    write_terminal_title(&mut output, state);
+    if state.osc_clipboard_sync {
+        write_osc_clipboard(tui, state, &mut output);
+    }
+
+    // Print the number of passes and latency in the top right corner.
+    let time_end = std::time::Instant::now();
+    let status = time_end - time_beg;
+
+    let scratch_alt = scratch_arena(Some(&scratch));
+    let status = arena_format!(
+        &scratch_alt,
+        "{}P {}B {:.3}μs",
+        passes,
+        output.len(),
+        status.as_nanos() as f64 / 1000.0
+    );
+
+    // "μs" is 3 bytes and 2 columns.
+    let cols = status.len() as CoordType - 3 + 2;
+
+    // Since the status may shrink and grow, we may have to overwrite the previous one with whitespace.
+    let padding = (*last_latency_width - cols).max(0);
+
+    // If the `output` is already very large,
+    // Rust may double the size during the write below.
+    // Let's avoid that by reserving the needed size in advance.
+    output.reserve_exact(128);
+
+    // To avoid moving the cursor, push and pop it onto the VT cursor stack.
+    _ = write!(
+        output,
+        "\x1b7\x1b[0;41;97m\x1b[1;{0}H{1:2$}{3}\x1b8",
+        tui.size().width - cols - padding + 1,
+        "",
+        padding as usize,
+        status
+    );
+
+    *last_latency_width = cols;
+    sys::write_stdout(&output);
 }
 
 // Returns true if the application should exit early.
@@ -340,159 +349,175 @@ fn draw(ctx: &mut Context, state: &mut State) {
     }
     draw_editor(ctx, state);
     draw_statusbar(ctx, state);
-
-    if state.wants_close {
-        draw_handle_wants_close(ctx, state);
-    }
-    if state.wants_exit {
-        draw_handle_wants_exit(ctx, state);
-    }
-    if state.wants_goto {
-        draw_goto_menu(ctx, state);
-    }
-    if state.wants_file_picker != StateFilePicker::None {
-        draw_file_picker(ctx, state);
-    }
-    if state.wants_save {
-        draw_handle_save(ctx, state);
-    }
-    if state.wants_encoding_change != StateEncodingChange::None {
-        draw_dialog_encoding_change(ctx, state);
-    }
-    if state.wants_go_to_file {
-        draw_go_to_file(ctx, state);
-    }
-    if state.wants_find_in_files {
-        draw_find_in_files(ctx, state);
-    }
-    if state.wants_command_palette {
-        draw_command_palette(ctx, state);
-    }
-    if state.wants_quick_switcher {
-        draw_quick_switcher(ctx, state);
-    }
-    if state.wants_theme_picker {
-        draw_theme_picker(ctx, state);
-    }
-    if state.wants_recent_files {
-        draw_menubar::draw_recent_files(ctx, state);
-    }
-    if state.wants_keybinding_editor {
-        draw_keybinding_editor(ctx, state);
-    }
-    if state.wants_about {
-        draw_dialog_about(ctx, state);
-    }
-    if state.wants_context_help {
-        draw_context_help(ctx, state);
-    }
-    if state.wants_quick_start {
-        draw_quick_start(ctx, state);
-    }
-    if state.wants_binary_prompt {
-        draw_binary_prompt(ctx, state);
-    }
-    if state.wants_replace_preview {
-        draw_replace_preview(ctx, state);
-    }
-    if ctx.clipboard_ref().wants_host_sync() {
-        draw_handle_clipboard_change(ctx, state);
-    }
-    if state.error_log_count != 0 {
-        draw_error_log(ctx, state);
-    }
+    draw_overlays(ctx, state);
 
     if let Some(key) = ctx.keyboard_input() {
-        // Shortcuts that are not handled as part of the textarea, etc.
-
-        if key == state.keybindings.shortcut(commands::CommandId::FileNew) {
-            commands::run_command(ctx, state, commands::CommandId::FileNew);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FileOpen) {
-            commands::run_command(ctx, state, commands::CommandId::FileOpen);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FileSave) {
-            commands::run_command(ctx, state, commands::CommandId::FileSave);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FileSaveAs) {
-            commands::run_command(ctx, state, commands::CommandId::FileSaveAs);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FileClose) {
-            commands::run_command(ctx, state, commands::CommandId::FileClose);
-        } else if key == state.keybindings.shortcut(commands::CommandId::ViewGoToFile) {
-            commands::run_command(ctx, state, commands::CommandId::ViewGoToFile);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FileExit) {
-            commands::run_command(ctx, state, commands::CommandId::FileExit);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FileGoto) {
-            commands::run_command(ctx, state, commands::CommandId::FileGoto);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditFind)
-            && state.wants_search.kind != StateSearchKind::Disabled
-        {
-            commands::run_command(ctx, state, commands::CommandId::EditFind);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditReplace)
-            && state.wants_search.kind != StateSearchKind::Disabled
-        {
-            commands::run_command(ctx, state, commands::CommandId::EditReplace);
-        } else if key == state.keybindings.shortcut(commands::CommandId::FindInFiles) {
-            commands::run_command(ctx, state, commands::CommandId::FindInFiles);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditSelectLine) {
-            commands::run_command(ctx, state, commands::CommandId::EditSelectLine);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditDuplicateLine) {
-            commands::run_command(ctx, state, commands::CommandId::EditDuplicateLine);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditDeleteLine) {
-            commands::run_command(ctx, state, commands::CommandId::EditDeleteLine);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditJoinLines) {
-            commands::run_command(ctx, state, commands::CommandId::EditJoinLines);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditMoveLineUp) {
-            commands::run_command(ctx, state, commands::CommandId::EditMoveLineUp);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditMoveLineDown) {
-            commands::run_command(ctx, state, commands::CommandId::EditMoveLineDown);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditGotoMatchingBracket) {
-            commands::run_command(ctx, state, commands::CommandId::EditGotoMatchingBracket);
-        } else if key == state.keybindings.shortcut(commands::CommandId::CommandPalette) {
-            commands::run_command(ctx, state, commands::CommandId::CommandPalette);
-        } else if key == state.keybindings.shortcut(commands::CommandId::ThemePicker) {
-            commands::run_command(ctx, state, commands::CommandId::ThemePicker);
-        } else if key == state.keybindings.shortcut(commands::CommandId::QuickSwitcher) {
-            commands::run_command(ctx, state, commands::CommandId::QuickSwitcher);
-        } else if key == state.keybindings.shortcut(commands::CommandId::SettingsOpenConfig) {
-            commands::run_command(ctx, state, commands::CommandId::SettingsOpenConfig);
-        } else if key == state.keybindings.shortcut(commands::CommandId::SettingsReload) {
-            commands::run_command(ctx, state, commands::CommandId::SettingsReload);
-        } else if key == state.keybindings.shortcut(commands::CommandId::ViewShowWhitespace) {
-            commands::run_command(ctx, state, commands::CommandId::ViewShowWhitespace);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditConvertUppercase) {
-            commands::run_command(ctx, state, commands::CommandId::EditConvertUppercase);
-        } else if key == state.keybindings.shortcut(commands::CommandId::EditConvertLowercase) {
-            commands::run_command(ctx, state, commands::CommandId::EditConvertLowercase);
-        } else if key == vk::F3 {
-            search_execute(ctx, state, SearchAction::Search);
-        } else {
+        if !handle_global_shortcuts(ctx, state, key) {
             return;
         }
-
         // All of the above shortcuts happen to require a rerender.
         ctx.needs_rerender();
         ctx.set_input_consumed();
     }
 }
 
+fn draw_overlay_if(
+    condition: bool,
+    ctx: &mut Context,
+    state: &mut State,
+    draw_fn: fn(&mut Context, &mut State),
+) {
+    if condition {
+        draw_fn(ctx, state);
+    }
+}
+
+fn draw_overlays(ctx: &mut Context, state: &mut State) {
+    draw_overlay_if(state.wants_close, ctx, state, draw_handle_wants_close);
+    draw_overlay_if(state.wants_exit, ctx, state, draw_handle_wants_exit);
+    draw_overlay_if(state.wants_goto, ctx, state, draw_goto_menu);
+    draw_overlay_if(state.wants_file_picker != StateFilePicker::None, ctx, state, draw_file_picker);
+    draw_overlay_if(state.wants_save, ctx, state, draw_handle_save);
+    draw_overlay_if(
+        state.wants_encoding_change != StateEncodingChange::None,
+        ctx,
+        state,
+        draw_dialog_encoding_change,
+    );
+    draw_overlay_if(state.wants_go_to_file, ctx, state, draw_go_to_file);
+    draw_overlay_if(state.wants_find_in_files, ctx, state, draw_find_in_files);
+    draw_overlay_if(state.wants_command_palette, ctx, state, draw_command_palette);
+    draw_overlay_if(state.wants_quick_switcher, ctx, state, draw_quick_switcher);
+    draw_overlay_if(state.wants_theme_picker, ctx, state, draw_theme_picker);
+    draw_overlay_if(state.wants_recent_files, ctx, state, draw_menubar::draw_recent_files);
+    draw_overlay_if(state.wants_keybinding_editor, ctx, state, draw_keybinding_editor);
+    draw_overlay_if(state.wants_about, ctx, state, draw_dialog_about);
+    draw_overlay_if(state.wants_context_help, ctx, state, draw_context_help);
+    draw_overlay_if(state.wants_quick_start, ctx, state, draw_quick_start);
+    draw_overlay_if(state.wants_binary_prompt, ctx, state, draw_binary_prompt);
+    draw_overlay_if(state.wants_replace_preview, ctx, state, draw_replace_preview);
+    draw_overlay_if(
+        ctx.clipboard_ref().wants_host_sync(),
+        ctx,
+        state,
+        draw_handle_clipboard_change,
+    );
+    draw_overlay_if(state.error_log_count != 0, ctx, state, draw_error_log);
+}
+
+fn run_bound_shortcut(
+    ctx: &mut Context,
+    state: &mut State,
+    key: input::InputKey,
+    id: commands::CommandId,
+) -> bool {
+    if key == state.keybindings.shortcut(id) {
+        commands::run_command(ctx, state, id);
+        true
+    } else {
+        false
+    }
+}
+
+fn run_bound_shortcuts(
+    ctx: &mut Context,
+    state: &mut State,
+    key: input::InputKey,
+    shortcuts: &[commands::CommandId],
+) -> bool {
+    for &id in shortcuts {
+        if run_bound_shortcut(ctx, state, key, id) {
+            return true;
+        }
+    }
+    false
+}
+
+const FIRST_GLOBAL_SHORTCUTS: &[commands::CommandId] = &[
+    commands::CommandId::FileNew,
+    commands::CommandId::FileOpen,
+    commands::CommandId::FileSave,
+    commands::CommandId::FileSaveAs,
+    commands::CommandId::FileClose,
+    commands::CommandId::ViewGoToFile,
+    commands::CommandId::FileExit,
+    commands::CommandId::FileGoto,
+];
+
+const SECOND_GLOBAL_SHORTCUTS: &[commands::CommandId] = &[
+    commands::CommandId::FindInFiles,
+    commands::CommandId::EditSelectLine,
+    commands::CommandId::EditDuplicateLine,
+    commands::CommandId::EditDeleteLine,
+    commands::CommandId::EditJoinLines,
+    commands::CommandId::EditMoveLineUp,
+    commands::CommandId::EditMoveLineDown,
+    commands::CommandId::EditGotoMatchingBracket,
+    commands::CommandId::CommandPalette,
+    commands::CommandId::ThemePicker,
+    commands::CommandId::QuickSwitcher,
+    commands::CommandId::SettingsOpenConfig,
+    commands::CommandId::SettingsReload,
+    commands::CommandId::ViewShowWhitespace,
+    commands::CommandId::EditConvertUppercase,
+    commands::CommandId::EditConvertLowercase,
+];
+
+fn handle_find_replace_shortcuts(
+    ctx: &mut Context,
+    state: &mut State,
+    key: input::InputKey,
+) -> bool {
+    state.wants_search.kind != StateSearchKind::Disabled
+        && (run_bound_shortcut(ctx, state, key, commands::CommandId::EditFind)
+            || run_bound_shortcut(ctx, state, key, commands::CommandId::EditReplace))
+}
+
+fn handle_global_shortcuts(ctx: &mut Context, state: &mut State, key: input::InputKey) -> bool {
+    if run_bound_shortcuts(ctx, state, key, FIRST_GLOBAL_SHORTCUTS) {
+        return true;
+    }
+
+    if handle_find_replace_shortcuts(ctx, state, key) {
+        return true;
+    }
+
+    if run_bound_shortcuts(ctx, state, key, SECOND_GLOBAL_SHORTCUTS) {
+        return true;
+    }
+
+    if key == vk::F3 {
+        search_execute(ctx, state, SearchAction::Search);
+        return true;
+    }
+
+    false
+}
+
+fn has_open_overlay(state: &State) -> bool {
+    state.wants_close
+        || state.wants_exit
+        || state.wants_goto
+        || state.wants_file_picker != StateFilePicker::None
+        || state.wants_save
+        || state.wants_encoding_change != StateEncodingChange::None
+        || state.wants_go_to_file
+        || state.wants_find_in_files
+        || state.wants_command_palette
+        || state.wants_quick_switcher
+        || state.wants_theme_picker
+        || state.wants_recent_files
+        || state.wants_keybinding_editor
+        || state.wants_about
+        || state.wants_context_help
+        || state.wants_quick_start
+        || state.wants_binary_prompt
+        || state.wants_replace_preview
+}
+
 /// Returns true if no dialogs, modals, or overlays are open.
 fn is_at_top_level(state: &State) -> bool {
-    !state.wants_close
-        && !state.wants_exit
-        && !state.wants_goto
-        && state.wants_file_picker == StateFilePicker::None
-        && !state.wants_save
-        && state.wants_encoding_change == StateEncodingChange::None
-        && !state.wants_go_to_file
-        && !state.wants_find_in_files
-        && !state.wants_command_palette
-        && !state.wants_quick_switcher
-        && !state.wants_theme_picker
-        && !state.wants_recent_files
-        && !state.wants_keybinding_editor
-        && !state.wants_about
-        && !state.wants_context_help
-        && !state.wants_quick_start
-        && !state.wants_binary_prompt
-        && !state.wants_replace_preview
+    !has_open_overlay(state)
         && state.error_log_count == 0
         && state.wants_search.kind == StateSearchKind::Hidden
 }
