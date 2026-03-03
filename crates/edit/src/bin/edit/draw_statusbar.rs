@@ -991,10 +991,19 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
 
     if do_search {
         let root = state.find_in_files_root.as_path();
-        let results = find_in_files::search(root, &state.find_in_files_query);
+        let results = find_in_files::search(root, &state.find_in_files_query, state.search_options);
         state.find_in_files_results = results;
         state.find_in_files_selected = 0;
-        state.find_in_files_status = format!("{} result(s)", state.find_in_files_results.len());
+        let truncated = state.find_in_files_results.len() >= find_in_files::max_results_limit();
+        state.find_in_files_status = if truncated {
+            format!(
+                "{} result(s) (truncated at limit {})",
+                state.find_in_files_results.len(),
+                find_in_files::max_results_limit()
+            )
+        } else {
+            format!("{} result(s)", state.find_in_files_results.len())
+        };
         ctx.needs_rerender();
     } else if do_preview {
         let root = state.find_in_files_root.as_path();
@@ -1016,6 +1025,7 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
             root,
             &state.find_in_files_query,
             &state.find_in_files_replacement,
+            state.search_options,
             &mut state.documents,
         ) {
             Ok(stats) => {
@@ -1024,7 +1034,7 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
                     stats.replacements, stats.files_changed, stats.skipped_dirty
                 );
                 state.find_in_files_results =
-                    find_in_files::search(root, &state.find_in_files_query);
+                    find_in_files::search(root, &state.find_in_files_query, state.search_options);
                 state.find_in_files_selected = 0;
             }
             Err(err) => {
@@ -1127,6 +1137,7 @@ pub fn draw_replace_preview(ctx: &mut Context, state: &mut State) {
                 root,
                 &state.find_in_files_query,
                 &state.find_in_files_replacement,
+                state.search_options,
                 &mut state.documents,
             ) {
                 error_log_add(ctx, state, err);

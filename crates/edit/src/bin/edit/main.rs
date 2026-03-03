@@ -452,6 +452,8 @@ const SECOND_GLOBAL_SHORTCUTS: &[commands::CommandId] = &[
     commands::CommandId::EditJoinLines,
     commands::CommandId::EditMoveLineUp,
     commands::CommandId::EditMoveLineDown,
+    commands::CommandId::EditToggleLineComment,
+    commands::CommandId::EditToggleBlockComment,
     commands::CommandId::EditGotoMatchingBracket,
     commands::CommandId::CommandPalette,
     commands::CommandId::ThemePicker,

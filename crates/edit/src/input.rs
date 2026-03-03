@@ -27,7 +27,7 @@ impl InputKey {
     }
 
     pub(crate) const fn from_ascii(ch: char) -> Option<Self> {
-        if ch == ' ' || (ch >= '0' && ch <= '9') {
+        if ch == ' ' || ch == '-' || ch == '/' || (ch >= '0' && ch <= '9') {
             Some(Self(ch as u32))
         } else if ch >= 'a' && ch <= 'z' {
             Some(Self(ch as u32 & !0x20)) // Shift a-z to A-Z
@@ -109,6 +109,8 @@ pub mod vk {
     pub const RETURN: InputKey = InputKey::new('\r' as u32);
     pub const ESCAPE: InputKey = InputKey::new(0x1B);
     pub const SPACE: InputKey = InputKey::new(' ' as u32);
+    pub const MINUS: InputKey = InputKey::new('-' as u32);
+    pub const SLASH: InputKey = InputKey::new('/' as u32);
     pub const PRIOR: InputKey = InputKey::new(0x21);
     pub const NEXT: InputKey = InputKey::new(0x22);
 
@@ -333,6 +335,7 @@ impl<'input> Iterator for Stream<'_, '_, 'input> {
                 vt::Token::Ctrl(ch) => match ch {
                     '\0' | '\t' | '\r' => return Some(Input::Keyboard(InputKey::new(ch as u32))),
                     '\n' => return Some(Input::Keyboard(kbmod::CTRL | vk::RETURN)),
+                    '\x1f' => return Some(Input::Keyboard(kbmod::CTRL | vk::SLASH)),
                     ..='\x1a' => {
                         // Shift control code to A-Z
                         let key = ch as u32 | 0x40;

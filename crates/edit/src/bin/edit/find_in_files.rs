@@ -6,16 +6,48 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use edit::buffer::SearchOptions;
+use edit::buffer::{SearchOptions, TextBuffer};
 use edit::{apperr, sys};
 
 use crate::documents::DocumentManager;
 use crate::state::{DisplayablePathBuf, ReplacePreviewItem};
 
-const MAX_RESULTS: usize = 500;
-const MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
-const MAX_RECURSION_DEPTH: usize = 24;
-const MAX_FILES_SCANNED: usize = 50_000;
+const DEFAULT_MAX_RESULTS: usize = 500;
+const DEFAULT_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024;
+const DEFAULT_MAX_RECURSION_DEPTH: usize = 24;
+const DEFAULT_MAX_FILES_SCANNED: usize = 50_000;
+
+fn env_usize(name: &str, default: usize, min: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|v| v.max(min))
+        .unwrap_or(default)
+}
+
+fn env_u64(name: &str, default: u64, min: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|v| v.max(min))
+        .unwrap_or(default)
+}
+
+pub fn max_results_limit() -> usize {
+    env_usize("EDIT_FIND_MAX_RESULTS", DEFAULT_MAX_RESULTS, 1)
+}
+
+fn max_file_size_limit() -> u64 {
+    env_u64("EDIT_FIND_MAX_FILE_SIZE", DEFAULT_MAX_FILE_SIZE, 1024)
+}
+
+fn max_recursion_depth_limit() -> usize {
+    env_usize("EDIT_FIND_MAX_RECURSION_DEPTH", DEFAULT_MAX_RECURSION_DEPTH, 1)
+}
+
+fn max_files_scanned_limit() -> usize {
+    env_usize("EDIT_FIND_MAX_FILES", DEFAULT_MAX_FILES_SCANNED, 1)
+}
 
 pub struct FindInFilesResult {
     pub path: DisplayablePathBuf,
@@ -30,7 +62,7 @@ pub struct ReplaceStats {
     pub skipped_dirty: usize,
 }
 
-pub fn search(root: &Path, query: &str) -> Vec<FindInFilesResult> {
+pub fn search(root: &Path, query: &str, options: SearchOptions) -> Vec<FindInFilesResult> {
     if query.is_empty() {
         return Vec::new();
     }
@@ -40,14 +72,14 @@ pub fn search(root: &Path, query: &str) -> Vec<FindInFilesResult> {
     collect_files(root, &mut files);
 
     for path in files {
-        if results.len() >= MAX_RESULTS {
+        if results.len() >= max_results_limit() {
             break;
         }
 
         let Ok(meta) = fs::metadata(&path) else {
             continue;
         };
-        if meta.len() > MAX_FILE_SIZE {
+        if meta.len() > max_file_size_limit() {
             continue;
         }
 
@@ -55,24 +87,11 @@ pub fn search(root: &Path, query: &str) -> Vec<FindInFilesResult> {
             continue;
         };
 
-        for (line_idx, line) in contents.lines().enumerate() {
-            let mut start = 0;
-            while let Some(pos) = line[start..].find(query) {
-                let col = start + pos;
-                results.push(FindInFilesResult {
-                    path: DisplayablePathBuf::from_path(path.clone()),
-                    line: line_idx + 1,
-                    column: col + 1,
-                    preview: trim_preview(line),
-                });
-                if results.len() >= MAX_RESULTS {
-                    break;
-                }
-                start = col + query.len();
-            }
-            if results.len() >= MAX_RESULTS {
-                break;
-            }
+        let available = max_results_limit().saturating_sub(results.len());
+        let file_results = search_file(&path, &contents, query, options, available);
+        results.extend(file_results);
+        if results.len() >= max_results_limit() {
+            break;
         }
     }
 
@@ -83,6 +102,7 @@ pub fn replace_all(
     root: &Path,
     query: &str,
     replacement: &str,
+    options: SearchOptions,
     documents: &mut DocumentManager,
 ) -> apperr::Result<ReplaceStats> {
     let mut stats = ReplaceStats { files_changed: 0, replacements: 0, skipped_dirty: 0 };
@@ -98,7 +118,7 @@ pub fn replace_all(
         let Ok(meta) = fs::metadata(&path) else {
             continue;
         };
-        if meta.len() > MAX_FILE_SIZE {
+        if meta.len() > max_file_size_limit() {
             continue;
         }
 
@@ -110,13 +130,9 @@ pub fn replace_all(
         let Ok(contents) = fs::read_to_string(&path) else {
             continue;
         };
-        if !contents.contains(query) {
-            continue;
-        }
-
-        let updated = contents.replace(query, replacement);
-        let replacements = count_occurrences(&contents, query);
-        if updated == contents {
+        let (updated, replacements) =
+            replace_all_in_text(&contents, query, replacement, options)?;
+        if replacements == 0 || updated == contents {
             continue;
         }
 
@@ -142,23 +158,20 @@ pub fn preview_replace(
     if query.is_empty() {
         return (Vec::new(), "No search text provided.".to_string());
     }
-    if options.use_regex {
-        return (Vec::new(), "Preview not available for regex search.".to_string());
-    }
 
     let mut results = Vec::new();
     let mut files = Vec::new();
     collect_files(root, &mut files);
 
     for path in files {
-        if results.len() >= MAX_RESULTS {
+        if results.len() >= max_results_limit() {
             break;
         }
 
         let Ok(meta) = fs::metadata(&path) else {
             continue;
         };
-        if meta.len() > MAX_FILE_SIZE {
+        if meta.len() > max_file_size_limit() {
             continue;
         }
 
@@ -166,26 +179,11 @@ pub fn preview_replace(
             continue;
         };
 
-        for (line_idx, line) in contents.lines().enumerate() {
-            let matches = preview_find_matches(line, query, options);
-            if matches.is_empty() {
-                continue;
-            }
-
-            let after = replace_line_with_matches(line, &matches, replacement);
-            let column = matches.first().map_or(1, |m| m.start + 1);
-
-            results.push(ReplacePreviewItem {
-                path: DisplayablePathBuf::from_path(path.clone()),
-                line: line_idx + 1,
-                column,
-                before: trim_preview(line),
-                after: trim_preview(&after),
-            });
-
-            if results.len() >= MAX_RESULTS {
-                break;
-            }
+        let available = max_results_limit().saturating_sub(results.len());
+        let file_preview = preview_file_replacements(&path, &contents, query, replacement, options, available);
+        results.extend(file_preview);
+        if results.len() >= max_results_limit() {
+            break;
         }
     }
 
@@ -204,7 +202,7 @@ fn collect_files_inner(
     visited_dirs: &mut HashSet<PathBuf>,
     depth: usize,
 ) {
-    if depth >= MAX_RECURSION_DEPTH || out.len() >= MAX_FILES_SCANNED {
+    if depth >= max_recursion_depth_limit() || out.len() >= max_files_scanned_limit() {
         return;
     }
 
@@ -218,7 +216,7 @@ fn collect_files_inner(
     };
 
     for entry in entries.flatten() {
-        if out.len() >= MAX_FILES_SCANNED {
+        if out.len() >= max_files_scanned_limit() {
             break;
         }
 
@@ -257,100 +255,197 @@ fn trim_preview(line: &str) -> String {
     preview
 }
 
-fn preview_find_matches(
-    line: &str,
-    needle: &str,
+fn search_file(
+    path: &Path,
+    contents: &str,
+    query: &str,
     options: SearchOptions,
-) -> Vec<std::ops::Range<usize>> {
-    if needle.is_empty() {
+    max_results: usize,
+) -> Vec<FindInFilesResult> {
+    if max_results == 0 {
         return Vec::new();
     }
 
-    let bytes = line.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    if needle_bytes.len() > bytes.len() {
-        return Vec::new();
-    }
+    let mut out = Vec::new();
+    let ranges = collect_match_ranges_in_text(contents, query, options, max_results);
+    let line_starts = build_line_starts(contents);
 
-    let mut matches = Vec::new();
-    let mut i = 0;
-    while i + needle_bytes.len() <= bytes.len() {
-        if !preview_matches_at(bytes, needle_bytes, i, options.match_case) {
-            i += 1;
-            continue;
-        }
-
-        if options.whole_word && !preview_is_word_boundary(bytes, i, needle_bytes.len()) {
-            i += 1;
-            continue;
-        }
-
-        matches.push(i..(i + needle_bytes.len()));
-        i += needle_bytes.len().max(1);
-    }
-
-    matches
-}
-
-fn preview_matches_at(haystack: &[u8], needle: &[u8], start: usize, match_case: bool) -> bool {
-    for (idx, &b) in needle.iter().enumerate() {
-        let h = haystack[start + idx];
-        if match_case {
-            if h != b {
-                return false;
-            }
-        } else if h.to_ascii_lowercase() != b.to_ascii_lowercase() {
-            return false;
+    for (start, _) in ranges {
+        let (line, column, line_text) = offset_to_line_col_and_text(contents, &line_starts, start);
+        out.push(FindInFilesResult {
+            path: DisplayablePathBuf::from_path(path.to_path_buf()),
+            line,
+            column,
+            preview: trim_preview(line_text),
+        });
+        if out.len() >= max_results {
+            break;
         }
     }
-    true
-}
 
-fn preview_is_word_boundary(haystack: &[u8], start: usize, len: usize) -> bool {
-    let left = start.checked_sub(1).map(|i| haystack[i]);
-    let right = haystack.get(start + len).copied();
-
-    let left_ok = left.map_or(true, |b| !preview_is_word_byte(b));
-    let right_ok = right.map_or(true, |b| !preview_is_word_byte(b));
-
-    left_ok && right_ok
-}
-
-fn preview_is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-fn replace_line_with_matches(
-    line: &str,
-    matches: &[std::ops::Range<usize>],
-    replacement: &str,
-) -> String {
-    if matches.is_empty() {
-        return line.to_string();
-    }
-
-    let mut out = String::new();
-    let mut last = 0;
-    for m in matches {
-        out.push_str(&line[last..m.start]);
-        out.push_str(replacement);
-        last = m.end;
-    }
-    out.push_str(&line[last..]);
     out
 }
 
-fn count_occurrences(haystack: &str, needle: &str) -> usize {
-    if needle.is_empty() {
-        return 0;
+fn preview_file_replacements(
+    path: &Path,
+    contents: &str,
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+    max_results: usize,
+) -> Vec<ReplacePreviewItem> {
+    if max_results == 0 {
+        return Vec::new();
     }
-    let mut count = 0;
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        count += 1;
-        start += pos + needle.len();
+
+    let mut out = Vec::new();
+    let ranges = collect_match_ranges_in_text(contents, query, options, max_results);
+    let line_starts = build_line_starts(contents);
+
+    for (start, _) in ranges {
+        let (line, column, line_text) = offset_to_line_col_and_text(contents, &line_starts, start);
+        let after = replace_line_preview(line_text, query, replacement, options);
+
+        out.push(ReplacePreviewItem {
+            path: DisplayablePathBuf::from_path(path.to_path_buf()),
+            line,
+            column,
+            before: trim_preview(line_text),
+            after: trim_preview(&after),
+        });
+        if out.len() >= max_results {
+            break;
+        }
     }
-    count
+
+    out
+}
+
+fn replace_line_preview(
+    line: &str,
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+) -> String {
+    match replace_all_in_text(line, query, replacement, options) {
+        Ok((updated, _)) => updated,
+        Err(_) => line.to_string(),
+    }
+}
+
+fn replace_all_in_text(
+    contents: &str,
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+) -> apperr::Result<(String, usize)> {
+    let ranges = collect_match_ranges_in_text(contents, query, options, usize::MAX);
+    if ranges.is_empty() {
+        return Ok((contents.to_string(), 0));
+    }
+
+    let buffer = TextBuffer::new_rc(false)?;
+    let mut tb = buffer.borrow_mut();
+    tb.copy_from_str(&contents.as_bytes());
+    tb.find_and_replace_all(query, options, replacement.as_bytes())?;
+    let updated = extract_buffer_text(&tb);
+    Ok((updated, ranges.len()))
+}
+
+fn extract_buffer_text(tb: &TextBuffer) -> String {
+    let mut out = Vec::with_capacity(tb.text_length());
+    let mut offset = 0usize;
+    while offset < tb.text_length() {
+        let chunk = tb.read_forward(offset);
+        if chunk.is_empty() {
+            break;
+        }
+        out.extend_from_slice(chunk);
+        offset += chunk.len();
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn collect_match_ranges_in_text(
+    contents: &str,
+    query: &str,
+    options: SearchOptions,
+    max_results: usize,
+) -> Vec<(usize, usize)> {
+    if query.is_empty() || max_results == 0 {
+        return Vec::new();
+    }
+
+    let buffer = match TextBuffer::new_rc(false) {
+        Ok(buffer) => buffer,
+        Err(_) => return Vec::new(),
+    };
+    let mut tb = buffer.borrow_mut();
+    tb.copy_from_str(&contents.as_bytes());
+
+    let mut first_hit: Option<(usize, usize)> = None;
+    let mut hits = Vec::new();
+
+    loop {
+        if tb.find_and_select(query, options).is_err() {
+            break;
+        }
+
+        let Some((beg, end)) = tb.selection_range() else {
+            break;
+        };
+
+        let hit = (beg.offset, end.offset);
+        if first_hit.is_none() {
+            first_hit = Some(hit);
+        } else if first_hit == Some(hit) {
+            break;
+        }
+
+        hits.push(hit);
+        if hits.len() >= max_results {
+            break;
+        }
+
+        let next = if end.offset > beg.offset {
+            end.offset
+        } else {
+            end.offset.saturating_add(1).min(tb.text_length())
+        };
+        if next >= tb.text_length() && end.offset >= tb.text_length() {
+            break;
+        }
+        tb.clear_selection();
+        tb.cursor_move_to_offset(next);
+    }
+
+    hits
+}
+
+fn build_line_starts(contents: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    starts.push(0);
+    for (idx, b) in contents.as_bytes().iter().enumerate() {
+        if *b == b'\n' && idx + 1 < contents.len() {
+            starts.push(idx + 1);
+        }
+    }
+    starts
+}
+
+fn offset_to_line_col_and_text<'a>(
+    contents: &'a str,
+    line_starts: &[usize],
+    offset: usize,
+) -> (usize, usize, &'a str) {
+    let idx = line_starts.partition_point(|start| *start <= offset).saturating_sub(1);
+    let line_start = line_starts[idx];
+    let line_end = contents[line_start..]
+        .find('\n')
+        .map_or(contents.len(), |pos| line_start + pos);
+    let line_text = contents[line_start..line_end].trim_end_matches('\r');
+    let column = contents[line_start..offset].chars().count() + 1;
+    (idx + 1, column, line_text)
 }
 
 #[cfg(test)]
@@ -374,13 +469,13 @@ mod tests {
     fn search_respects_recursion_depth_limit() {
         let root = temp_dir("depth");
         let mut current = root.clone();
-        for idx in 0..(MAX_RECURSION_DEPTH + 2) {
+        for idx in 0..(DEFAULT_MAX_RECURSION_DEPTH + 2) {
             current.push(format!("d{idx}"));
             fs::create_dir_all(&current).expect("failed to create nested dir");
         }
         fs::write(current.join("deep.txt"), b"needle").expect("failed to write deep file");
 
-        let results = search(&root, "needle");
+        let results = search(&root, "needle", SearchOptions::default());
         assert!(results.is_empty(), "deep file should not be reachable past recursion depth limit");
 
         let _ = fs::remove_dir_all(root);

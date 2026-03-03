@@ -114,10 +114,9 @@ pub fn draw_file_picker(ctx: &mut Context, state: &mut State) {
                 }
                 ctx.list_end();
 
-                // If the user typed something, we want to put focus back into the editline.
-                // TODO: The input should be processed by the editline and not simply get swallowed.
+                // If the user typed something while the suggestions list has focus,
+                // close the list so focus returns to the editline on the next frame.
                 if ctx.keyboard_input().is_some() {
-                    ctx.set_input_consumed();
                     autocomplete_done = true;
                 }
 

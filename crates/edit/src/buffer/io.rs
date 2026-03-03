@@ -59,15 +59,19 @@ impl TextBuffer {
             self.encoding = bom.unwrap_or("UTF-8");
         }
 
-        // TODO: Since reading the file can fail, we should ensure that we also reset the cursor here.
-        // I don't do it, so that `recalc_after_content_swap()` works.
         self.buffer.clear();
 
         let done = read == 0;
-        if self.encoding == "UTF-8" {
-            self.read_file_as_utf8(file, &mut buf, first_chunk_len, done)?;
+        let read_res = if self.encoding == "UTF-8" {
+            self.read_file_as_utf8(file, &mut buf, first_chunk_len, done)
         } else {
-            self.read_file_with_icu(file, &mut buf, first_chunk_len, done)?;
+            self.read_file_with_icu(file, &mut buf, first_chunk_len, done)
+        };
+        if let Err(err) = read_res {
+            // Keep cursor/selection in a valid state if file decoding fails mid-read.
+            self.clear_selection();
+            self.cursor_move_to_offset(0);
+            return Err(err);
         }
 
         // Figure out

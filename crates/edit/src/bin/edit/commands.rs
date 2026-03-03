@@ -20,7 +20,7 @@ pub enum CommandGroup {
     Other,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CommandId {
     FileNew,
     FileOpen,
@@ -460,73 +460,73 @@ pub fn command_list() -> Vec<Command> {
             id: SettingsThemeTerminal,
             label: "Theme: Terminal",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeNord,
             label: "Theme: Nord",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeOneDark,
             label: "Theme: One Dark",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeGruvbox,
             label: "Theme: Gruvbox",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeMonokai,
             label: "Theme: Monokai",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeSolarizedDark,
             label: "Theme: Solarized Dark",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeSolarizedLight,
             label: "Theme: Solarized Light",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeDracula,
             label: "Theme: Dracula",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeTokyoNight,
             label: "Theme: Tokyo Night",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeMidnight,
             label: "Theme: Midnight",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemePaperwhite,
             label: "Theme: Paperwhite",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeCustom,
             label: "Theme: Custom",
             requires_document: false,
-            show_in_palette: false,
+            show_in_palette: true,
         },
         Command {
             id: SettingsThemeCycle,
@@ -578,8 +578,8 @@ pub fn shortcut(id: CommandId) -> InputKey {
         EditTrimWhitespace => vk::NULL,
         EditMoveLineUp => kbmod::ALT | vk::UP,
         EditMoveLineDown => kbmod::ALT | vk::DOWN,
-        EditToggleLineComment => vk::NULL, // TODO: Need special handling for Ctrl+/
-        EditToggleBlockComment => vk::NULL, // TODO: Need special handling for Ctrl+Shift+/
+        EditToggleLineComment => kbmod::CTRL | vk::SLASH,
+        EditToggleBlockComment => kbmod::CTRL_SHIFT | vk::SLASH,
         EditGotoMatchingBracket => kbmod::CTRL | vk::M, // Ctrl+M (common alternative)
         EditEncodeBase64 => vk::NULL,
         EditDecodeBase64 => vk::NULL,
@@ -904,6 +904,9 @@ pub fn run_command(ctx: &mut Context, state: &mut State, id: CommandId) {
         SettingsToggleHighContrast => {
             state.settings.high_contrast = !state.settings.high_contrast;
             state.needs_theme_refresh = true;
+            if let Err(err) = config::persist_editor_ui_settings(&state.settings) {
+                crate::state::error_log_add(ctx, state, err);
+            }
             ctx.needs_rerender();
         }
         SettingsEditKeybindings => {
@@ -1177,6 +1180,8 @@ fn key_name(key: InputKey) -> Option<&'static str> {
         vk::RETURN => "Enter",
         vk::ESCAPE => "Esc",
         vk::SPACE => "Space",
+        vk::MINUS => "-",
+        vk::SLASH => "/",
         vk::TAB => "Tab",
         vk::BACK => "Backspace",
         vk::DELETE => "Delete",

@@ -247,6 +247,54 @@ pub fn persist_theme(theme: ThemeId) -> apperr::Result<()> {
     Ok(())
 }
 
+pub fn persist_editor_ui_settings(settings: &EditorSettings) -> apperr::Result<()> {
+    persist_settings_kv(&[
+        ("editor.high_contrast", bool_to_config(settings.high_contrast)),
+        ("editor.escape_to_exit", bool_to_config(settings.escape_to_exit)),
+    ])
+}
+
+fn bool_to_config(value: bool) -> String {
+    if value { "true".to_string() } else { "false".to_string() }
+}
+
+fn persist_settings_kv(entries: &[(&str, String)]) -> apperr::Result<()> {
+    let Some(path) = config_path() else {
+        return Ok(());
+    };
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let contents = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines = Vec::new();
+
+    for line in contents.lines() {
+        let key = line.split('#').next().unwrap_or("").splitn(2, '=').next().unwrap_or("").trim();
+        if entries.iter().any(|(name, _)| *name == key) {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+
+    if !entries.is_empty() {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        for (name, value) in entries {
+            lines.push(format!("{name} = {value}"));
+        }
+    }
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+    fs::write(&path, output)?;
+    Ok(())
+}
+
 pub fn persist_recents(files: &[PathBuf], folders: &[PathBuf]) -> apperr::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
@@ -301,9 +349,9 @@ pub fn persist_keybindings(keybindings: &Keybindings) -> apperr::Result<()> {
         .overrides()
         .iter()
         .filter_map(|(id, key)| {
-            let key_name = keybinding_config_key(*id)?;
+            let key_name = keybinding_config_key(*id);
             let value = format_keybinding_ascii(*key)?;
-            Some((key_name.to_string(), value))
+            Some((key_name, value))
         })
         .collect::<Vec<_>>();
 
@@ -335,45 +383,35 @@ pub fn persist_keybindings(keybindings: &Keybindings) -> apperr::Result<()> {
     Ok(())
 }
 
-fn keybinding_config_key(id: CommandId) -> Option<&'static str> {
-    Some(match id {
-        CommandId::CommandPalette => "keybindings.command_palette",
-        CommandId::FileNew => "keybindings.file_new",
-        CommandId::FileOpen => "keybindings.file_open",
-        CommandId::FileOpenFolder => "keybindings.file_open_folder",
-        CommandId::FileOpenRecentFolder => "keybindings.file_open_recent_folder",
-        CommandId::FileSave => "keybindings.file_save",
-        CommandId::FileSaveAs => "keybindings.file_save_as",
-        CommandId::FileClose => "keybindings.file_close",
-        CommandId::FileExit => "keybindings.file_exit",
-        CommandId::EditFind => "keybindings.edit_find",
-        CommandId::EditReplace => "keybindings.edit_replace",
-        CommandId::FindInFiles => "keybindings.find_in_files",
-        CommandId::ViewGoToFile => "keybindings.view_goto_file",
-        CommandId::FileGoto => "keybindings.file_goto",
-        CommandId::QuickSwitcher => "keybindings.quick_switcher",
-        CommandId::HelpContext => "keybindings.help_context",
-        CommandId::ThemePicker => "keybindings.theme_picker",
-        CommandId::SettingsOpenConfig => "keybindings.settings_open",
-        CommandId::SettingsReload => "keybindings.settings_reload",
-        CommandId::SettingsToggleHighContrast => "keybindings.settings_toggle_high_contrast",
-        CommandId::SettingsEditKeybindings => "keybindings.settings_edit_keybindings",
-        CommandId::SettingsThemeTerminal => "keybindings.theme_terminal",
-        CommandId::SettingsThemeNord => "keybindings.theme_nord",
-        CommandId::SettingsThemeOneDark => "keybindings.theme_one_dark",
-        CommandId::SettingsThemeGruvbox => "keybindings.theme_gruvbox",
-        CommandId::SettingsThemeMonokai => "keybindings.theme_monokai",
-        CommandId::SettingsThemeSolarizedDark => "keybindings.theme_solarized_dark",
-        CommandId::SettingsThemeSolarizedLight => "keybindings.theme_solarized_light",
-        CommandId::SettingsThemeDracula => "keybindings.theme_dracula",
-        CommandId::SettingsThemeTokyoNight => "keybindings.theme_tokyo_night",
-        CommandId::SettingsThemeMidnight => "keybindings.theme_midnight",
-        CommandId::SettingsThemePaperwhite => "keybindings.theme_paperwhite",
-        CommandId::SettingsThemeCustom => "keybindings.theme_custom",
-        CommandId::SettingsThemeCycle => "keybindings.theme_cycle",
-        CommandId::SettingsThemePrevious => "keybindings.theme_previous",
-        _ => return None,
-    })
+fn keybinding_config_key(id: CommandId) -> String {
+    format!("keybindings.{}", command_id_to_config_suffix(id))
+}
+
+fn command_id_to_config_suffix(id: CommandId) -> String {
+    camel_to_snake(&format!("{id:?}"))
+}
+
+fn command_id_from_config_key(key: &str) -> Option<CommandId> {
+    let suffix = key.strip_prefix("keybindings.")?;
+    crate::commands::command_list()
+        .into_iter()
+        .find_map(|cmd| (command_id_to_config_suffix(cmd.id) == suffix).then_some(cmd.id))
+}
+
+fn camel_to_snake(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    let chars = value.chars().collect::<Vec<_>>();
+    for (i, ch) in chars.iter().enumerate() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            if prev.is_ascii_lowercase() || next.is_some_and(|n| n.is_ascii_lowercase()) {
+                out.push('_');
+            }
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
 }
 
 fn format_keybinding_ascii(key: InputKey) -> Option<String> {
@@ -452,6 +490,8 @@ fn key_name_ascii(key: InputKey) -> Option<&'static str> {
         vk::RETURN => "Enter",
         vk::ESCAPE => "Esc",
         vk::SPACE => "Space",
+        vk::MINUS => "Minus",
+        vk::SLASH => "Slash",
         vk::TAB => "Tab",
         vk::BACK => "Backspace",
         vk::DELETE => "Delete",
@@ -491,7 +531,7 @@ fn default_config_text() -> &'static str {
         "# keybindings.quick_switcher = Ctrl+E\n",
         "# keybindings.help_context = Shift+F1\n",
         "# keybindings.settings_edit_keybindings = Ctrl+K\n",
-        "# keybindings.theme_picker = Ctrl+Shift+T\n",
+        "# keybindings.theme_picker = Ctrl+T\n",
         "# keybindings.theme_terminal = Ctrl+Alt+1\n",
         "# keybindings.theme_nord = Ctrl+Alt+2\n",
         "# keybindings.theme_gruvbox = Ctrl+Alt+3\n",
@@ -502,7 +542,7 @@ fn default_config_text() -> &'static str {
         "# keybindings.theme_previous = Ctrl+Alt+9\n",
         "# keybindings.theme_one_dark = Ctrl+Alt+7\n",
         "# keybindings.theme_monokai = Ctrl+Alt+8\n",
-        "# keybindings.theme_solarized_dark = Ctrl+Alt+-\n",
+        "# keybindings.theme_solarized_dark = Ctrl+Alt+Minus\n",
         "# keybindings.theme_midnight = Ctrl+Alt+M\n",
         "# keybindings.theme_paperwhite = Ctrl+Alt+P\n",
         "# keybindings.theme_custom = Ctrl+Alt+C\n",
@@ -575,44 +615,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn parse_keybinding(key: &str, value: &str) -> Option<(CommandId, InputKey)> {
-    let id = match key {
-        "keybindings.command_palette" => CommandId::CommandPalette,
-        "keybindings.file_new" => CommandId::FileNew,
-        "keybindings.file_open" => CommandId::FileOpen,
-        "keybindings.file_open_folder" => CommandId::FileOpenFolder,
-        "keybindings.file_open_recent_folder" => CommandId::FileOpenRecentFolder,
-        "keybindings.file_save" => CommandId::FileSave,
-        "keybindings.file_save_as" => CommandId::FileSaveAs,
-        "keybindings.file_close" => CommandId::FileClose,
-        "keybindings.file_exit" => CommandId::FileExit,
-        "keybindings.edit_find" => CommandId::EditFind,
-        "keybindings.edit_replace" => CommandId::EditReplace,
-        "keybindings.find_in_files" => CommandId::FindInFiles,
-        "keybindings.view_goto_file" => CommandId::ViewGoToFile,
-        "keybindings.file_goto" => CommandId::FileGoto,
-        "keybindings.quick_switcher" => CommandId::QuickSwitcher,
-        "keybindings.help_context" => CommandId::HelpContext,
-        "keybindings.theme_picker" => CommandId::ThemePicker,
-        "keybindings.settings_open" => CommandId::SettingsOpenConfig,
-        "keybindings.settings_reload" => CommandId::SettingsReload,
-        "keybindings.settings_toggle_high_contrast" => CommandId::SettingsToggleHighContrast,
-        "keybindings.settings_edit_keybindings" => CommandId::SettingsEditKeybindings,
-        "keybindings.theme_terminal" => CommandId::SettingsThemeTerminal,
-        "keybindings.theme_nord" => CommandId::SettingsThemeNord,
-        "keybindings.theme_gruvbox" => CommandId::SettingsThemeGruvbox,
-        "keybindings.theme_solarized_light" => CommandId::SettingsThemeSolarizedLight,
-        "keybindings.theme_dracula" => CommandId::SettingsThemeDracula,
-        "keybindings.theme_tokyo_night" => CommandId::SettingsThemeTokyoNight,
-        "keybindings.theme_cycle" => CommandId::SettingsThemeCycle,
-        "keybindings.theme_previous" => CommandId::SettingsThemePrevious,
-        "keybindings.theme_one_dark" => CommandId::SettingsThemeOneDark,
-        "keybindings.theme_monokai" => CommandId::SettingsThemeMonokai,
-        "keybindings.theme_solarized_dark" => CommandId::SettingsThemeSolarizedDark,
-        "keybindings.theme_midnight" => CommandId::SettingsThemeMidnight,
-        "keybindings.theme_paperwhite" => CommandId::SettingsThemePaperwhite,
-        "keybindings.theme_custom" => CommandId::SettingsThemeCustom,
-        _ => return None,
-    };
+    let id = command_id_from_config_key(key)?;
 
     parse_key(value).map(|key| (id, key))
 }
@@ -621,7 +624,12 @@ fn parse_key(value: &str) -> Option<InputKey> {
     let mut mods = kbmod::NONE;
     let mut key = None;
 
-    for part in value.split(|c| c == '+' || c == '-') {
+    let mut parts = value.split('+');
+    if !value.contains('+') {
+        parts = value.split('-');
+    }
+
+    for part in parts {
         let token = part.trim();
         if token.is_empty() {
             continue;
@@ -741,6 +749,8 @@ fn parse_key_token(token: &str) -> Option<InputKey> {
     }
 
     match token {
+        "MINUS" | "-" => Some(vk::MINUS),
+        "SLASH" | "/" => Some(vk::SLASH),
         "ENTER" | "RETURN" => Some(vk::RETURN),
         "ESC" | "ESCAPE" => Some(vk::ESCAPE),
         "SPACE" => Some(vk::SPACE),
@@ -787,5 +797,29 @@ pub fn apply_settings_to_all(
 ) {
     for doc in documents.iter() {
         apply_settings_to_document(settings, doc);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keybinding_mapping_covers_all_commands() {
+        for command in crate::commands::command_list() {
+            let key = keybinding_config_key(command.id);
+            assert!(
+                command_id_from_config_key(&key) == Some(command.id),
+                "config key roundtrip failed for {:?}: {}",
+                command.id,
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn key_parser_supports_minus_and_slash() {
+        assert!(parse_key("Ctrl+Slash") == Some(kbmod::CTRL | vk::SLASH));
+        assert!(parse_key("Ctrl+Alt+Minus") == Some(kbmod::CTRL_ALT | vk::MINUS));
     }
 }
