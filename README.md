@@ -203,6 +203,12 @@ Environment variable | Description
 `EDIT_CFG_ICU*` | See [ICU library name (SONAME)](#icu-library-name-soname) for details.
 `EDIT_CFG_LANGUAGES` | A comma-separated list of languages to include in the build. See [i18n/edit.toml](i18n/edit.toml) for available languages.
 
+### Cargo Features
+
+Feature | Description
+--- | ---
+`debug-latency` | Shows frame timing information in the status bar for local performance diagnostics.
+
 ## Configuration
 
 Edit32 stores its configuration in a platform-specific location:
@@ -213,6 +219,15 @@ Edit32 stores its configuration in a platform-specific location:
 ### Customizing Keybindings
 
 Press `Ctrl+K` to open the keybindings editor. You can remap any command to a different key combination.
+
+### Runtime Environment
+
+Environment variable | Default | Description
+--- | --- | ---
+`EDIT_FIND_MAX_RESULTS` | `500` | Maximum Find in Files matches kept in memory and displayed.
+`EDIT_FIND_MAX_FILE_SIZE` | `2097152` | Maximum file size, in bytes, searched by Find in Files.
+`EDIT_FIND_MAX_RECURSION_DEPTH` | `24` | Maximum folder recursion depth for Find in Files.
+`EDIT_FIND_MAX_FILES` | `50000` | Maximum number of files scanned by one Find in Files operation.
 
 ## Notes to Package Maintainers
 

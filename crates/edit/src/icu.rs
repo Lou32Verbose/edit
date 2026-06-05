@@ -970,7 +970,7 @@ enum LibraryFunctionsState {
 enum LibraryLoadFailure {
     Unknown,
     Library,
-    Symbol,
+    Symbol(*const c_char),
 }
 
 static mut LIBRARY_FUNCTIONS: LibraryFunctionsState = LibraryFunctionsState::Uninitialized;
@@ -981,12 +981,15 @@ pub fn init() -> apperr::Result<()> {
     Ok(())
 }
 
-pub fn missing_diagnostic() -> &'static str {
+pub fn missing_diagnostic() -> Option<String> {
     unsafe {
         match LIBRARY_LOAD_FAILURE {
-            LibraryLoadFailure::Library => "ICU library could not be loaded",
-            LibraryLoadFailure::Symbol => "required ICU function could not be loaded",
-            LibraryLoadFailure::Unknown => "",
+            LibraryLoadFailure::Library => Some("ICU library could not be loaded".to_owned()),
+            LibraryLoadFailure::Symbol(name) => Some(format!(
+                "required ICU function could not be loaded: {}",
+                CStr::from_ptr(name).to_string_lossy()
+            )),
+            LibraryLoadFailure::Unknown => None,
         }
     }
 }
@@ -1034,13 +1037,15 @@ fn init_if_needed() -> apperr::Result<&'static LibraryFunctions> {
                 (icu.libicui18n, &LIBICUI18N_PROC_NAMES[..]),
             ] {
                 for &name in names {
+                    let export_name = name;
+
                     #[cfg(edit_icu_renaming_auto_detect)]
                     let scratch = scratch_arena(Some(&scratch_outer));
                     #[cfg(edit_icu_renaming_auto_detect)]
                     let name = sys::icu_add_renaming_suffix(&scratch, name, &suffix);
 
                     let Ok(func) = sys::get_proc_address(handle, name) else {
-                        LIBRARY_LOAD_FAILURE = LibraryLoadFailure::Symbol;
+                        LIBRARY_LOAD_FAILURE = LibraryLoadFailure::Symbol(export_name);
                         debug_assert!(
                             false,
                             "Failed to load ICU function: {:?}",

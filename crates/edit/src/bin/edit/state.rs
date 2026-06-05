@@ -30,11 +30,10 @@ impl std::fmt::Display for FormatApperr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
             apperr::APP_ICU_MISSING => {
-                let diagnostic = icu::missing_diagnostic();
-                if diagnostic.is_empty() {
-                    f.write_str(loc(LocId::ErrorIcuMissing))
-                } else {
+                if let Some(diagnostic) = icu::missing_diagnostic() {
                     write!(f, "{} ({diagnostic})", loc(LocId::ErrorIcuMissing))
+                } else {
+                    f.write_str(loc(LocId::ErrorIcuMissing))
                 }
             }
             apperr::Error::App(code) => write!(f, "Unknown app error code: {code}"),

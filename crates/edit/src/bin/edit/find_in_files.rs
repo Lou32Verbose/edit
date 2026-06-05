@@ -621,6 +621,20 @@ mod tests {
     }
 
     #[test]
+    fn search_status_reports_truncation_and_all_skip_types() {
+        let stats = SearchStats {
+            files_scanned: 12,
+            skipped_large: 2,
+            skipped_unreadable: 3,
+            truncated: true,
+        };
+
+        let status = format_search_status(500, &stats);
+        assert!(status.contains("truncated at limit"));
+        assert!(status.contains("skipped 2 large, 3 unreadable"));
+    }
+
+    #[test]
     fn replace_all_skips_dirty_open_documents() {
         let root = temp_dir("dirty");
         let file = root.join("dirty.txt");
