@@ -60,42 +60,69 @@ pub struct ReplaceStats {
     pub files_changed: usize,
     pub replacements: usize,
     pub skipped_dirty: usize,
+    pub skipped_large: usize,
+    pub skipped_unreadable: usize,
 }
 
-pub fn search(root: &Path, query: &str, options: SearchOptions) -> Vec<FindInFilesResult> {
+#[derive(Default)]
+pub struct SearchStats {
+    pub files_scanned: usize,
+    pub skipped_large: usize,
+    pub skipped_unreadable: usize,
+    pub truncated: bool,
+}
+
+pub struct SearchReport {
+    pub results: Vec<FindInFilesResult>,
+    pub stats: SearchStats,
+}
+
+pub struct ReplacePreviewReport {
+    pub results: Vec<ReplacePreviewItem>,
+    pub status: String,
+}
+
+pub fn search_with_report(root: &Path, query: &str, options: SearchOptions) -> SearchReport {
     if query.is_empty() {
-        return Vec::new();
+        return SearchReport { results: Vec::new(), stats: SearchStats::default() };
     }
 
     let mut results = Vec::new();
+    let mut stats = SearchStats::default();
     let mut files = Vec::new();
     collect_files(root, &mut files);
 
     for path in files {
         if results.len() >= max_results_limit() {
+            stats.truncated = true;
             break;
         }
 
         let Ok(meta) = fs::metadata(&path) else {
+            stats.skipped_unreadable += 1;
             continue;
         };
         if meta.len() > max_file_size_limit() {
+            stats.skipped_large += 1;
             continue;
         }
 
         let Ok(contents) = fs::read_to_string(&path) else {
+            stats.skipped_unreadable += 1;
             continue;
         };
 
+        stats.files_scanned += 1;
         let available = max_results_limit().saturating_sub(results.len());
         let file_results = search_file(&path, &contents, query, options, available);
         results.extend(file_results);
         if results.len() >= max_results_limit() {
+            stats.truncated = true;
             break;
         }
     }
 
-    results
+    SearchReport { results, stats }
 }
 
 pub fn replace_all(
@@ -105,7 +132,13 @@ pub fn replace_all(
     options: SearchOptions,
     documents: &mut DocumentManager,
 ) -> apperr::Result<ReplaceStats> {
-    let mut stats = ReplaceStats { files_changed: 0, replacements: 0, skipped_dirty: 0 };
+    let mut stats = ReplaceStats {
+        files_changed: 0,
+        replacements: 0,
+        skipped_dirty: 0,
+        skipped_large: 0,
+        skipped_unreadable: 0,
+    };
 
     if query.is_empty() {
         return Ok(stats);
@@ -116,9 +149,11 @@ pub fn replace_all(
 
     for path in files {
         let Ok(meta) = fs::metadata(&path) else {
+            stats.skipped_unreadable += 1;
             continue;
         };
         if meta.len() > max_file_size_limit() {
+            stats.skipped_large += 1;
             continue;
         }
 
@@ -128,10 +163,10 @@ pub fn replace_all(
         }
 
         let Ok(contents) = fs::read_to_string(&path) else {
+            stats.skipped_unreadable += 1;
             continue;
         };
-        let (updated, replacements) =
-            replace_all_in_text(&contents, query, replacement, options)?;
+        let (updated, replacements) = replace_all_in_text(&contents, query, replacement, options)?;
         if replacements == 0 || updated == contents {
             continue;
         }
@@ -148,47 +183,92 @@ pub fn replace_all(
     Ok(stats)
 }
 
-pub fn preview_replace(
+pub fn preview_replace_with_report(
     root: &Path,
     query: &str,
     replacement: &str,
     options: SearchOptions,
-) -> (Vec<ReplacePreviewItem>, String) {
+) -> ReplacePreviewReport {
     let query = query.trim_ascii();
     if query.is_empty() {
-        return (Vec::new(), "No search text provided.".to_string());
+        return ReplacePreviewReport {
+            results: Vec::new(),
+            status: "No search text provided.".to_string(),
+        };
     }
 
     let mut results = Vec::new();
+    let mut stats = SearchStats::default();
     let mut files = Vec::new();
     collect_files(root, &mut files);
 
     for path in files {
         if results.len() >= max_results_limit() {
+            stats.truncated = true;
             break;
         }
 
         let Ok(meta) = fs::metadata(&path) else {
+            stats.skipped_unreadable += 1;
             continue;
         };
         if meta.len() > max_file_size_limit() {
+            stats.skipped_large += 1;
             continue;
         }
 
         let Ok(contents) = fs::read_to_string(&path) else {
+            stats.skipped_unreadable += 1;
             continue;
         };
 
+        stats.files_scanned += 1;
         let available = max_results_limit().saturating_sub(results.len());
-        let file_preview = preview_file_replacements(&path, &contents, query, replacement, options, available);
+        let file_preview =
+            preview_file_replacements(&path, &contents, query, replacement, options, available);
         results.extend(file_preview);
         if results.len() >= max_results_limit() {
+            stats.truncated = true;
             break;
         }
     }
 
-    let status = format!("{} preview item(s)", results.len());
-    (results, status)
+    let status = format_preview_status(results.len(), &stats);
+    ReplacePreviewReport { results, status }
+}
+
+pub fn format_search_status(result_count: usize, stats: &SearchStats) -> String {
+    let mut status = if stats.truncated {
+        format!("{result_count} result(s) (truncated at limit {})", max_results_limit())
+    } else {
+        format!("{result_count} result(s)")
+    };
+    append_scan_warnings(&mut status, stats);
+    status
+}
+
+fn format_preview_status(result_count: usize, stats: &SearchStats) -> String {
+    let mut status = if stats.truncated {
+        format!("{result_count} preview item(s) (truncated at limit {})", max_results_limit())
+    } else {
+        format!("{result_count} preview item(s)")
+    };
+    append_scan_warnings(&mut status, stats);
+    status
+}
+
+fn append_scan_warnings(status: &mut String, stats: &SearchStats) {
+    let mut warnings = Vec::new();
+    if stats.skipped_large > 0 {
+        warnings.push(format!("{} large", stats.skipped_large));
+    }
+    if stats.skipped_unreadable > 0 {
+        warnings.push(format!("{} unreadable", stats.skipped_unreadable));
+    }
+    if !warnings.is_empty() {
+        status.push_str("; skipped ");
+        status.push_str(&warnings.join(", "));
+    }
 }
 
 fn collect_files(root: &Path, out: &mut Vec<PathBuf>) {
@@ -344,7 +424,7 @@ fn replace_all_in_text(
         return Ok((contents.to_string(), 0));
     }
 
-    let buffer = TextBuffer::new_rc(false)?;
+    let buffer = TextBuffer::new_rc(true)?;
     let mut tb = buffer.borrow_mut();
     tb.copy_from_str(&contents.as_bytes());
     tb.find_and_replace_all(query, options, replacement.as_bytes())?;
@@ -376,7 +456,16 @@ fn collect_match_ranges_in_text(
         return Vec::new();
     }
 
-    let buffer = match TextBuffer::new_rc(false) {
+    if !options.use_regex && !options.whole_word && contents.is_ascii() && query.is_ascii() {
+        return collect_ascii_literal_match_ranges(
+            contents,
+            query,
+            options.match_case,
+            max_results,
+        );
+    }
+
+    let buffer = match TextBuffer::new_rc(true) {
         Ok(buffer) => buffer,
         Err(_) => return Vec::new(),
     };
@@ -422,6 +511,36 @@ fn collect_match_ranges_in_text(
     hits
 }
 
+fn collect_ascii_literal_match_ranges(
+    contents: &str,
+    query: &str,
+    match_case: bool,
+    max_results: usize,
+) -> Vec<(usize, usize)> {
+    let haystack;
+    let needle;
+    let (contents_search, query_search) = if match_case {
+        (contents, query)
+    } else {
+        haystack = contents.to_ascii_lowercase();
+        needle = query.to_ascii_lowercase();
+        (haystack.as_str(), needle.as_str())
+    };
+
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while offset <= contents_search.len() && ranges.len() < max_results {
+        let Some(found) = contents_search[offset..].find(query_search) else {
+            break;
+        };
+        let start = offset + found;
+        let end = start + query_search.len();
+        ranges.push((start, end));
+        offset = end.max(start + 1);
+    }
+    ranges
+}
+
 fn build_line_starts(contents: &str) -> Vec<usize> {
     let mut starts = Vec::new();
     starts.push(0);
@@ -440,9 +559,7 @@ fn offset_to_line_col_and_text<'a>(
 ) -> (usize, usize, &'a str) {
     let idx = line_starts.partition_point(|start| *start <= offset).saturating_sub(1);
     let line_start = line_starts[idx];
-    let line_end = contents[line_start..]
-        .find('\n')
-        .map_or(contents.len(), |pos| line_start + pos);
+    let line_end = contents[line_start..].find('\n').map_or(contents.len(), |pos| line_start + pos);
     let line_text = contents[line_start..line_end].trim_end_matches('\r');
     let column = contents[line_start..offset].chars().count() + 1;
     (idx + 1, column, line_text)
@@ -475,8 +592,53 @@ mod tests {
         }
         fs::write(current.join("deep.txt"), b"needle").expect("failed to write deep file");
 
-        let results = search(&root, "needle", SearchOptions::default());
+        let results = search_with_report(&root, "needle", SearchOptions::default()).results;
         assert!(results.is_empty(), "deep file should not be reachable past recursion depth limit");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_reports_large_and_unreadable_skips() {
+        let root = temp_dir("skips");
+        fs::write(root.join("hit.txt"), b"needle").expect("failed to write hit file");
+
+        let large = root.join("large.txt");
+        fs::write(&large, vec![b'a'; DEFAULT_MAX_FILE_SIZE as usize + 1])
+            .expect("failed to write large file");
+
+        let report = search_with_report(&root, "needle", SearchOptions::default());
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.stats.files_scanned, 1);
+        assert_eq!(report.stats.skipped_large, 1);
+        assert!(!report.stats.truncated);
+
+        let status = format_search_status(report.results.len(), &report.stats);
+        assert!(status.contains("1 result"));
+        assert!(status.contains("skipped 1 large"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replace_all_skips_dirty_open_documents() {
+        let root = temp_dir("dirty");
+        let file = root.join("dirty.txt");
+        fs::write(&file, b"needle\n").expect("failed to write dirty file");
+
+        let settings = crate::config::EditorSettings::default();
+        let mut documents = DocumentManager::default();
+        documents
+            .add_test_document_for_path(file.clone(), &settings, true)
+            .expect("failed to add dirty test document");
+
+        let stats =
+            replace_all(&root, "needle", "replacement", SearchOptions::default(), &mut documents)
+                .expect("replace_all failed");
+        assert_eq!(stats.replacements, 0);
+        assert_eq!(stats.files_changed, 0);
+        assert_eq!(stats.skipped_dirty, 1);
+        assert_eq!(fs::read_to_string(&file).expect("failed to read dirty file"), "needle\n");
 
         let _ = fs::remove_dir_all(root);
     }

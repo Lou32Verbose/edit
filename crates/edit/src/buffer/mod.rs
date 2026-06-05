@@ -814,13 +814,12 @@ impl TextBuffer {
     /// Assumes that the line count doesn't change.
     pub fn copy_from_str(&mut self, text: &dyn ReadableDocument) {
         if self.buffer.copy_from(text) {
+            self.stats.logical_lines = count_document_lines(text);
             self.recalc_after_content_swap();
-            self.cursor_move_to_logical(Point { x: CoordType::MAX, y: 0 });
-
-            let delete = self.buffer.len() - self.cursor.offset;
-            if delete != 0 {
-                self.buffer.allocate_gap(self.cursor.offset, 0, delete);
-            }
+            self.cursor_move_to_logical(Point {
+                x: CoordType::MAX,
+                y: self.stats.logical_lines.saturating_sub(1),
+            });
         }
     }
 
@@ -2136,22 +2135,31 @@ impl TextBuffer {
             return;
         }
 
-        // Collect all cursors with their selections, sorted by offset descending
-        let mut cursors_data: Vec<(Cursor, Option<TextBufferSelection>)> = Vec::new();
-        cursors_data.push((self.cursor, self.selection));
+        let mut writes: Vec<(Cursor, Option<Cursor>)> = Vec::new();
+        let collect_write =
+            |this: &TextBuffer, cursor: Cursor, selection: Option<TextBufferSelection>| {
+                if let Some(selection) = selection {
+                    let [beg_pt, end_pt] = minmax(selection.beg, selection.end);
+                    let beg = this.cursor_move_to_logical_internal(cursor, beg_pt);
+                    let end = this.cursor_move_to_logical_internal(beg, end_pt);
+                    (beg, Some(end))
+                } else {
+                    (cursor, None)
+                }
+            };
+
+        writes.push(collect_write(self, self.cursor, self.selection));
         for sc in &self.secondary_cursors {
-            cursors_data.push((sc.cursor, sc.selection));
+            writes.push(collect_write(self, sc.cursor, sc.selection));
         }
-        // Sort by offset descending (process from end to start)
-        cursors_data.sort_by(|a, b| b.0.offset.cmp(&a.0.offset));
+        writes.sort_by(|a, b| b.0.offset.cmp(&a.0.offset));
 
         self.edit_begin_grouping();
 
-        // Process each cursor from end to start
-        for (cursor, selection) in cursors_data {
-            // Temporarily set the primary cursor and selection
+        for (cursor, selection_end) in writes {
             self.cursor = cursor;
-            self.selection = selection;
+            self.selection = selection_end
+                .map(|end| TextBufferSelection { beg: cursor.logical_pos, end: end.logical_pos });
             self.write(text, self.cursor, false);
         }
 
@@ -2862,4 +2870,78 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
 
     haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+fn count_document_lines(document: &dyn ReadableDocument) -> CoordType {
+    let mut lines = 1;
+    let mut offset = 0;
+    loop {
+        let chunk = document.read_forward(offset);
+        if chunk.is_empty() {
+            break;
+        }
+        lines += chunk.iter().filter(|&&b| b == b'\n').count() as CoordType;
+        offset += chunk.len();
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_with_text(text: &[u8]) -> TextBuffer {
+        let mut buffer = TextBuffer::new(true).expect("failed to create test buffer");
+        buffer.copy_from_str(&text);
+        buffer
+    }
+
+    fn buffer_text(buffer: &TextBuffer) -> String {
+        let mut out = Vec::new();
+        let mut offset = 0;
+        while offset < buffer.text_length() {
+            let chunk = buffer.read_forward(offset);
+            if chunk.is_empty() {
+                break;
+            }
+            out.extend_from_slice(chunk);
+            offset += chunk.len();
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn block_selection_converts_to_multiple_cursors_for_editing() {
+        let mut buffer = buffer_with_text(b"abc\ndef\nghi\n");
+        buffer.cursor_move_to_logical(Point { x: 1, y: 0 });
+
+        buffer.block_selection_extend(1, 0);
+        buffer.block_selection_extend(0, 1);
+        buffer.block_selection_extend(0, 1);
+
+        assert!(buffer.has_block_selection());
+        assert_eq!(buffer.block_selection_bounds(), Some((0, 2, 1, 2)));
+        buffer.write_canon_all(b"X");
+
+        assert_eq!(buffer_text(&buffer), "aXc\ndXf\ngXi\n");
+        assert!(!buffer.has_block_selection());
+        assert!(!buffer.has_multiple_cursors());
+    }
+
+    #[test]
+    fn add_next_occurrence_creates_secondary_cursor_with_selection() {
+        let mut buffer = buffer_with_text(b"alpha beta alpha\n");
+        buffer.cursor_move_to_logical(Point { x: 0, y: 0 });
+
+        buffer.add_cursor_at_next_occurrence();
+        assert!(buffer.has_selection());
+
+        buffer.add_cursor_at_next_occurrence();
+        assert_eq!(buffer.cursor_count(), 2);
+
+        let ranges = buffer.all_selection_ranges();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].0.offset..ranges[0].1.offset, 0..5);
+        assert_eq!(ranges[1].0.offset..ranges[1].1.offset, 11..16);
+    }
 }

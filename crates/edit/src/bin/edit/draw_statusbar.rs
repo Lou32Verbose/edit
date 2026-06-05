@@ -159,6 +159,11 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
             &arena_format!(ctx.arena(), "Theme: {}", state.settings.theme.display_name()),
         );
 
+        if let Some(label) = doc.mode.status_label() {
+            ctx.label("document-mode", label);
+            ctx.attr_overflow(Overflow::TruncateTail);
+        }
+
         ctx.label(
             "location",
             &arena_format!(
@@ -991,30 +996,26 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
 
     if do_search {
         let root = state.find_in_files_root.as_path();
-        let results = find_in_files::search(root, &state.find_in_files_query, state.search_options);
-        state.find_in_files_results = results;
+        let report = find_in_files::search_with_report(
+            root,
+            &state.find_in_files_query,
+            state.search_options,
+        );
+        state.find_in_files_results = report.results;
         state.find_in_files_selected = 0;
-        let truncated = state.find_in_files_results.len() >= find_in_files::max_results_limit();
-        state.find_in_files_status = if truncated {
-            format!(
-                "{} result(s) (truncated at limit {})",
-                state.find_in_files_results.len(),
-                find_in_files::max_results_limit()
-            )
-        } else {
-            format!("{} result(s)", state.find_in_files_results.len())
-        };
+        state.find_in_files_status =
+            find_in_files::format_search_status(state.find_in_files_results.len(), &report.stats);
         ctx.needs_rerender();
     } else if do_preview {
         let root = state.find_in_files_root.as_path();
-        let (results, status) = find_in_files::preview_replace(
+        let report = find_in_files::preview_replace_with_report(
             root,
             &state.find_in_files_query,
             &state.find_in_files_replacement,
             state.search_options,
         );
-        state.replace_preview_results = results;
-        state.replace_preview_status = status;
+        state.replace_preview_results = report.results;
+        state.replace_preview_status = report.status;
         state.replace_preview_in_files = true;
         state.wants_replace_preview = true;
         state.wants_find_in_files = false;
@@ -1029,12 +1030,32 @@ pub fn draw_find_in_files(ctx: &mut Context, state: &mut State) {
             &mut state.documents,
         ) {
             Ok(stats) => {
+                let mut skipped = Vec::new();
+                if stats.skipped_dirty > 0 {
+                    skipped.push(format!("{} dirty", stats.skipped_dirty));
+                }
+                if stats.skipped_large > 0 {
+                    skipped.push(format!("{} large", stats.skipped_large));
+                }
+                if stats.skipped_unreadable > 0 {
+                    skipped.push(format!("{} unreadable", stats.skipped_unreadable));
+                }
                 state.find_in_files_status = format!(
-                    "Replaced {} occurrence(s) in {} file(s), skipped {} dirty file(s)",
-                    stats.replacements, stats.files_changed, stats.skipped_dirty
+                    "Replaced {} occurrence(s) in {} file(s){}",
+                    stats.replacements,
+                    stats.files_changed,
+                    if skipped.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; skipped {}", skipped.join(", "))
+                    }
                 );
-                state.find_in_files_results =
-                    find_in_files::search(root, &state.find_in_files_query, state.search_options);
+                let report = find_in_files::search_with_report(
+                    root,
+                    &state.find_in_files_query,
+                    state.search_options,
+                );
+                state.find_in_files_results = report.results;
                 state.find_in_files_selected = 0;
             }
             Err(err) => {
@@ -1133,14 +1154,20 @@ pub fn draw_replace_preview(ctx: &mut Context, state: &mut State) {
     if apply {
         if state.replace_preview_in_files {
             let root = state.find_in_files_root.as_path();
-            if let Err(err) = find_in_files::replace_all(
+            match find_in_files::replace_all(
                 root,
                 &state.find_in_files_query,
                 &state.find_in_files_replacement,
                 state.search_options,
                 &mut state.documents,
             ) {
-                error_log_add(ctx, state, err);
+                Ok(stats) => {
+                    state.find_in_files_status = format!(
+                        "Replaced {} occurrence(s) in {} file(s), skipped {} dirty file(s)",
+                        stats.replacements, stats.files_changed, stats.skipped_dirty
+                    );
+                }
+                Err(err) => error_log_add(ctx, state, err),
             }
         } else {
             search_execute(ctx, state, SearchAction::ReplaceAll);

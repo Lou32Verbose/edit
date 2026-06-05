@@ -1186,7 +1186,13 @@ fn context_help_lines(state: &State) -> &'static [&'static str] {
             "- Press Esc to cancel capture",
         ];
     }
-    &["General:", "- F1: Command Palette", "- Ctrl+O: Open file", "- Ctrl+Shift+O: Open folder"]
+    &[
+        "General:",
+        "- F1: Command Palette",
+        "- Ctrl+O: Open file",
+        "- Ctrl+Shift+O: Open folder",
+        "- Alt+Shift+Arrows: Block selection",
+    ]
 }
 
 fn draw_quick_start(ctx: &mut Context, state: &mut State) {
@@ -1226,6 +1232,7 @@ fn quick_start_lines() -> &'static [&'static str] {
         "- Ctrl+Shift+O: Open folder",
         "- Ctrl+S: Save",
         "- Ctrl+F: Find, Ctrl+R: Replace",
+        "- Alt+Shift+Arrows: Block selection",
         "- F1: Command Palette",
         "- Ctrl+E: Quick Switcher",
         "- View > Theme: Theme Picker",

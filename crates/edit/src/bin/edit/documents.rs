@@ -31,8 +31,22 @@ pub enum DocumentMode {
     Hex,
 }
 
+impl DocumentMode {
+    pub fn status_label(self) -> Option<&'static str> {
+        match self {
+            DocumentMode::Text => None,
+            DocumentMode::LargeText => Some("Large file mode"),
+            DocumentMode::Hex => Some("Hex view (read-only)"),
+        }
+    }
+}
+
 impl Document {
     pub fn save(&mut self, new_path: Option<PathBuf>) -> apperr::Result<()> {
+        if self.mode == DocumentMode::Hex {
+            return Err(apperr::APP_HEX_VIEW_READ_ONLY);
+        }
+
         let path = new_path.as_deref().unwrap_or_else(|| self.path.as_ref().unwrap().as_path());
 
         let buffer = self.buffer.clone();
@@ -417,6 +431,40 @@ impl DocumentManager {
         Ok(buffer)
     }
 
+    #[cfg(test)]
+    pub fn add_test_document_for_path(
+        &mut self,
+        path: PathBuf,
+        settings: &EditorSettings,
+        dirty: bool,
+    ) -> apperr::Result<()> {
+        let buffer = TextBuffer::new_rc(true)?;
+        {
+            let mut tb = buffer.borrow_mut();
+            tb.set_tab_size(settings.tab_size);
+            tb.set_indent_with_tabs(settings.indent_with_tabs);
+            if dirty {
+                tb.mark_as_dirty();
+            } else {
+                tb.mark_as_clean();
+            }
+        }
+
+        let mut doc = Document {
+            buffer,
+            path: None,
+            dir: None,
+            filename: Default::default(),
+            file_id: None,
+            new_file_counter: 0,
+            mode: DocumentMode::Text,
+        };
+        doc.set_path(path);
+        doc.apply_mode_settings(settings);
+        self.list.push_front(doc);
+        Ok(())
+    }
+
     // Parse a filename in the form of "filename:line:char".
     // Returns the position of the first colon and the line/char coordinates.
     fn parse_filename_goto(path: &Path) -> (&Path, Option<Point>) {
@@ -531,5 +579,27 @@ mod tests {
         assert_eq!(parse("1:a"), ("1:a", None));
         assert_eq!(parse("file.txt:10"), ("file.txt", Some(Point { x: 0, y: 9 })));
         assert_eq!(parse("file.txt:10:5"), ("file.txt", Some(Point { x: 4, y: 9 })));
+    }
+
+    #[test]
+    fn document_mode_labels_explain_restricted_modes() {
+        assert_eq!(DocumentMode::Text.status_label(), None);
+        assert_eq!(DocumentMode::LargeText.status_label(), Some("Large file mode"));
+        assert_eq!(DocumentMode::Hex.status_label(), Some("Hex view (read-only)"));
+    }
+
+    #[test]
+    fn hex_documents_are_read_only() {
+        let settings = EditorSettings::default();
+        let path = PathBuf::from("binary.bin");
+        let mut manager = DocumentManager::default();
+        manager
+            .add_test_document_for_path(path, &settings, false)
+            .expect("failed to add test document");
+
+        let doc = manager.active_mut().expect("missing active test document");
+        doc.mode = DocumentMode::Hex;
+        let err = doc.save(None).expect_err("hex view should not save generated text");
+        assert_eq!(err, apperr::APP_HEX_VIEW_READ_ONLY);
     }
 }

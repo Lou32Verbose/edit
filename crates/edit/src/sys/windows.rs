@@ -59,14 +59,19 @@ type ReadConsoleInputExW = unsafe extern "system" fn(
     w_flags: u16,
 ) -> BOOL;
 
-unsafe extern "system" fn read_console_input_ex_placeholder(
+unsafe extern "system" fn read_console_input_ex_unavailable(
     _: Foundation::HANDLE,
     _: *mut Console::INPUT_RECORD,
     _: u32,
-    _: *mut u32,
+    lp_number_of_events_read: *mut u32,
     _: u16,
 ) -> BOOL {
-    panic!();
+    if !lp_number_of_events_read.is_null() {
+        unsafe {
+            *lp_number_of_events_read = 0;
+        }
+    }
+    0
 }
 
 const CONSOLE_READ_NOWAIT: u16 = 0x0002;
@@ -90,7 +95,7 @@ struct State {
 }
 
 static mut STATE: State = State {
-    read_console_input_ex: read_console_input_ex_placeholder,
+    read_console_input_ex: read_console_input_ex_unavailable,
     stdin: null_mut(),
     stdout: null_mut(),
     stdin_cp_old: 0,

@@ -9,6 +9,7 @@ use std::{io, result};
 use crate::sys;
 
 pub const APP_ICU_MISSING: Error = Error::new_app(0);
+pub const APP_HEX_VIEW_READ_ONLY: Error = Error::new_app(1);
 
 /// Edit32's transparent `Result` type.
 pub type Result<T> = result::Result<T, Error>;

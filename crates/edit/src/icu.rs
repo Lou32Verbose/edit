@@ -966,11 +966,29 @@ enum LibraryFunctionsState {
     Loaded(LibraryFunctions),
 }
 
+#[derive(Clone, Copy)]
+enum LibraryLoadFailure {
+    Unknown,
+    Library,
+    Symbol,
+}
+
 static mut LIBRARY_FUNCTIONS: LibraryFunctionsState = LibraryFunctionsState::Uninitialized;
+static mut LIBRARY_LOAD_FAILURE: LibraryLoadFailure = LibraryLoadFailure::Unknown;
 
 pub fn init() -> apperr::Result<()> {
     init_if_needed()?;
     Ok(())
+}
+
+pub fn missing_diagnostic() -> &'static str {
+    unsafe {
+        match LIBRARY_LOAD_FAILURE {
+            LibraryLoadFailure::Library => "ICU library could not be loaded",
+            LibraryLoadFailure::Symbol => "required ICU function could not be loaded",
+            LibraryLoadFailure::Unknown => "",
+        }
+    }
 }
 
 #[allow(static_mut_refs)]
@@ -979,8 +997,10 @@ fn init_if_needed() -> apperr::Result<&'static LibraryFunctions> {
     fn load() {
         unsafe {
             LIBRARY_FUNCTIONS = LibraryFunctionsState::Failed;
+            LIBRARY_LOAD_FAILURE = LibraryLoadFailure::Unknown;
 
             let Ok(icu) = sys::load_icu() else {
+                LIBRARY_LOAD_FAILURE = LibraryLoadFailure::Library;
                 return;
             };
 
@@ -1020,6 +1040,7 @@ fn init_if_needed() -> apperr::Result<&'static LibraryFunctions> {
                     let name = sys::icu_add_renaming_suffix(&scratch, name, &suffix);
 
                     let Ok(func) = sys::get_proc_address(handle, name) else {
+                        LIBRARY_LOAD_FAILURE = LibraryLoadFailure::Symbol;
                         debug_assert!(
                             false,
                             "Failed to load ICU function: {:?}",
